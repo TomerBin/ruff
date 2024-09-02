@@ -265,6 +265,7 @@ impl Violation for PytestParametrizeValuesWrongType {
 #[violation]
 pub struct PytestDuplicateParametrizeTestCases {
     index: usize,
+    duplicated_id: bool,
 }
 
 impl Violation for PytestDuplicateParametrizeTestCases {
@@ -272,7 +273,15 @@ impl Violation for PytestDuplicateParametrizeTestCases {
 
     #[derive_message_formats]
     fn message(&self) -> String {
-        let PytestDuplicateParametrizeTestCases { index } = self;
+        let PytestDuplicateParametrizeTestCases {
+            index,
+            duplicated_id,
+        } = self;
+        if *duplicated_id {
+            return format!(
+                "Duplicate of test param id at index `{index}` in `@pytest_mark.parametrize`"
+            );
+        }
         format!("Duplicate of test case at index {index} in `@pytest_mark.parametrize`")
     }
 
@@ -653,30 +662,68 @@ fn check_duplicates(checker: &mut Checker, values: &Expr) {
 
     let mut seen: FxHashMap<ComparableExpr, usize> =
         FxHashMap::with_capacity_and_hasher(elts.len(), FxBuildHasher);
+    let mut seen_param_ids: FxHashMap<ComparableExpr, usize> =
+        FxHashMap::with_capacity_and_hasher(elts.len(), FxBuildHasher);
     let mut prev = None;
     for (index, element) in elts.iter().enumerate() {
+        if let Some(call) = element.as_call_expr() {
+            if checker
+                .semantic()
+                .resolve_qualified_name(&call.func)
+                .is_some_and(|name| matches!(name.segments(), ["pytest", "param"]))
+            {
+                let param_id = call.arguments.find_keyword("id").map(|id| &id.value);
+                if let Some(param_id) = param_id {
+                    let expr = ComparableExpr::from(param_id);
+                    seen_param_ids
+                        .entry(expr)
+                        .and_modify(|_| {
+                            let diagnostic = Diagnostic::new(
+                                PytestDuplicateParametrizeTestCases {
+                                    index,
+                                    duplicated_id: true,
+                                },
+                                element.range(),
+                            );
+                            checker.diagnostics.push(diagnostic);
+                        })
+                        .or_insert(index);
+                }
+            }
+        }
         let expr = ComparableExpr::from(element);
         seen.entry(expr)
             .and_modify(|index| {
                 let mut diagnostic = Diagnostic::new(
-                    PytestDuplicateParametrizeTestCases { index: *index },
+                    PytestDuplicateParametrizeTestCases {
+                        index: *index,
+                        duplicated_id: false,
+                    },
                     element.range(),
                 );
-                if let Some(prev) = prev {
-                    let values_end = values.end() - TextSize::new(1);
-                    let previous_end =
-                        trailing_comma(prev, checker.locator().contents(), values_end);
-                    let element_end =
-                        trailing_comma(element, checker.locator().contents(), values_end);
-                    let deletion_range = TextRange::new(previous_end, element_end);
-                    if !checker.comment_ranges().intersects(deletion_range) {
-                        diagnostic.set_fix(Fix::unsafe_edit(Edit::range_deletion(deletion_range)));
-                    }
-                }
+                generate_fix(&mut diagnostic, checker, values, prev, element);
                 checker.diagnostics.push(diagnostic);
             })
             .or_insert(index);
         prev = Some(element);
+    }
+}
+
+fn generate_fix(
+    diagnostic: &mut Diagnostic,
+    checker: &mut Checker,
+    values: &Expr,
+    prev: Option<&Expr>,
+    element: &Expr,
+) {
+    if let Some(prev) = prev {
+        let values_end = values.end() - TextSize::new(1);
+        let previous_end = trailing_comma(prev, checker.locator().contents(), values_end);
+        let element_end = trailing_comma(element, checker.locator().contents(), values_end);
+        let deletion_range = TextRange::new(previous_end, element_end);
+        if !checker.comment_ranges().intersects(deletion_range) {
+            diagnostic.set_fix(Fix::unsafe_edit(Edit::range_deletion(deletion_range)));
+        }
     }
 }
 

@@ -56,3 +56,22 @@ def test_ok(x):
 @pytest.mark.parametrize('data, spec', [(1.0, 1.0), (1.0, 1.0)])
 def test_numbers(data, spec):
     ...
+
+
+@pytest.mark.parametrize("x", [pytest.param(1, id='1'), pytest.param(2, id='2')])
+def test_ok(x):
+    ...
+
+
+@pytest.mark.parametrize("x", [pytest.param(1, id='1'), pytest.param(2, id='1')])
+def test_error_dup_param_id(x):
+    ...
+
+
+@pytest.mark.parametrize('data, spec', [pytest.param(1.0, 1.0, id='1'), pytest.param(2.0, 2.0, id='1')])
+def test_error_tuples_with_ids(data, spec):
+    ...
+
+@pytest.mark.parametrize('data, spec', [pytest.param(1.0, 1.0, id='1'), pytest.param(2.0, 2.0, id='2')])
+def test_ok_tuples_with_ids(data, spec):
+    ...

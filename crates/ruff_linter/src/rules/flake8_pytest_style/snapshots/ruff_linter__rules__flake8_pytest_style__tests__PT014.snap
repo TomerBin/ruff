@@ -183,3 +183,22 @@ PT014.py:56:53: PT014 [*] Duplicate of test case at index 0 in `@pytest_mark.par
    56 |+@pytest.mark.parametrize('data, spec', [(1.0, 1.0)])
 57 57 | def test_numbers(data, spec):
 58 58 |     ...
+59 59 | 
+
+PT014.py:66:57: PT014 Duplicate of test param id at index `1` in `@pytest_mark.parametrize`
+   |
+66 | @pytest.mark.parametrize("x", [pytest.param(1, id='1'), pytest.param(2, id='1')])
+   |                                                         ^^^^^^^^^^^^^^^^^^^^^^^ PT014
+67 | def test_error_dup_param_id(x):
+68 |     ...
+   |
+   = help: Remove duplicate test case
+
+PT014.py:71:73: PT014 Duplicate of test param id at index `1` in `@pytest_mark.parametrize`
+   |
+71 | @pytest.mark.parametrize('data, spec', [pytest.param(1.0, 1.0, id='1'), pytest.param(2.0, 2.0, id='1')])
+   |                                                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ PT014
+72 | def test_error_tuples_with_ids(data, spec):
+73 |     ...
+   |
+   = help: Remove duplicate test case
