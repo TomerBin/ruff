@@ -8,13 +8,13 @@ evaluated.
 
 ```py
 def _(flag: bool, number: int):
-    flag and (x := number)
-    # error: [possibly-unresolved-reference]
-    reveal_type(x)  # revealed: int
-
     flag or (y := number)
     # error: [possibly-unresolved-reference]
     reveal_type(y)  # revealed: int
+
+    flag and (x := number)
+    # error: [possibly-unresolved-reference]
+    reveal_type(x)  # revealed: int
 ```
 
 ## First expression is always evaluated
