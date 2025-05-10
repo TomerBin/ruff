@@ -71,10 +71,53 @@ struct ScopeInfo {
     current_loop: Option<Loop>,
 }
 
-struct AfterTest {
-    after_falsy: FlowSnapshot,
-    after_truthy: FlowSnapshot,
-    after_all: FlowSnapshot,
+enum TestFlowSnapshots {
+    BooleanExprTest {
+        might_short_circuited: FlowSnapshot,
+        never_short_circuited: FlowSnapshot,
+        op: BoolOp,
+    },
+    Default(FlowSnapshot),
+}
+
+impl TestFlowSnapshots {
+    fn flow(&self) -> &FlowSnapshot {
+        match self {
+            TestFlowSnapshots::Default(snapshot) => snapshot,
+            TestFlowSnapshots::BooleanExprTest {
+                might_short_circuited: might_short_circuit,
+                ..
+            } => might_short_circuit,
+        }
+    }
+
+    fn falsy_flow(&self) -> &FlowSnapshot {
+        match self {
+            TestFlowSnapshots::Default(flow_control) => flow_control,
+            TestFlowSnapshots::BooleanExprTest {
+                might_short_circuited: might_short_circuit,
+                never_short_circuited: no_short_circuit,
+                op,
+            } => match op {
+                BoolOp::And => might_short_circuit,
+                BoolOp::Or => no_short_circuit,
+            },
+        }
+    }
+
+    fn truthy_flow(&self) -> &FlowSnapshot {
+        match self {
+            TestFlowSnapshots::Default(flow_control) => flow_control,
+            TestFlowSnapshots::BooleanExprTest {
+                might_short_circuited: might_short_circuit,
+                never_short_circuited: no_short_circuit,
+                op,
+            } => match op {
+                BoolOp::And => no_short_circuit,
+                BoolOp::Or => might_short_circuit,
+            },
+        }
+    }
 }
 
 pub(super) struct SemanticIndexBuilder<'db> {
@@ -1506,7 +1549,7 @@ where
             }
             ast::Stmt::If(node) => {
                 let mut after_test = self.visit_test_expr(&node.test);
-                self.flow_restore(after_test.after_truthy.clone());
+                self.flow_restore(after_test.truthy_flow().clone());
                 let mut last_predicate = self.record_expression_narrowing_constraint(&node.test);
                 let mut reachability_constraint =
                     self.record_reachability_constraint(last_predicate);
@@ -1537,14 +1580,14 @@ where
                     post_clauses.push(self.flow_snapshot());
                     // we can only take an elif/else branch if none of the previous ones were
                     // taken
-                    self.flow_restore(after_test.after_falsy.clone());
+                    self.flow_restore(after_test.falsy_flow().clone());
                     self.record_negated_narrowing_constraint(last_predicate);
                     self.record_negated_reachability_constraint(reachability_constraint);
 
                     let elif_predicate = if let Some(elif_test) = clause_test {
                         after_test = self.visit_test_expr(elif_test);
                         // A test expression is evaluated whether the branch is taken or not
-                        self.flow_merge(after_test.after_truthy.clone());
+                        self.flow_merge(after_test.truthy_flow().clone());
                         reachability_constraint =
                             self.record_reachability_constraint(last_predicate);
                         let predicate = self.record_expression_narrowing_constraint(elif_test);
@@ -1569,7 +1612,7 @@ where
                     self.flow_merge(post_clause_state);
                 }
 
-                self.simplify_visibility_constraints(after_test.after_all.clone());
+                self.simplify_visibility_constraints(after_test.flow().clone());
             }
             ast::Stmt::While(ast::StmtWhile {
                 test,
@@ -2166,7 +2209,7 @@ where
                 range: _,
                 op,
             }) => {
-                self.visit_bool_op_expr(&values, &op);
+                self.visit_bool_op_expr(values, *op);
             }
             ast::Expr::Attribute(ast::ExprAttribute {
                 value: object,
@@ -2360,32 +2403,26 @@ where
 }
 
 impl<'db> SemanticIndexBuilder<'db> {
-    fn visit_test_expr(&mut self, test_expr: &'db Expr) -> AfterTest {
-        let mut after_test: AfterTest = match test_expr {
-            expr @ ast::Expr::BoolOp(ast::ExprBoolOp {
+    fn visit_test_expr(&mut self, test_expr: &'db Expr) -> TestFlowSnapshots {
+        match test_expr {
+            ast::Expr::BoolOp(ast::ExprBoolOp {
                 values,
                 range: _,
                 op,
             }) => {
                 self.prepare_expr(test_expr);
-                self.visit_bool_op_expr(&values, &op)
+                self.visit_bool_op_expr(values, *op)
             }
             _ => {
                 self.visit_expr(test_expr);
-                let snapshot = self.flow_snapshot();
-                AfterTest {
-                    after_falsy: snapshot.clone(),
-                    after_truthy: snapshot.clone(),
-                    after_all: snapshot.clone(),
-                }
+                TestFlowSnapshots::Default(self.flow_snapshot())
             }
-        };
-        after_test
+        }
     }
 }
 
 impl<'db> SemanticIndexBuilder<'db> {
-    fn visit_bool_op_expr(&mut self, values: &'db Vec<Expr>, op: &BoolOp) -> AfterTest {
+    fn visit_bool_op_expr(&mut self, values: &'db [Expr], op: BoolOp) -> TestFlowSnapshots {
         let pre_op = self.flow_snapshot();
 
         let mut short_circuits = vec![];
@@ -2438,22 +2475,15 @@ impl<'db> SemanticIndexBuilder<'db> {
         let might_short_circuited = self.flow_snapshot();
 
         self.simplify_visibility_constraints(pre_op);
-        match op {
-            BoolOp::And => AfterTest {
-                after_falsy: might_short_circuited.clone(),
-                after_truthy: never_short_circuited.clone(),
-                after_all: might_short_circuited,
-            },
-            BoolOp::Or => AfterTest {
-                after_falsy: never_short_circuited.clone(),
-                after_truthy: might_short_circuited.clone(),
-                after_all: might_short_circuited,
-            },
+        TestFlowSnapshots::BooleanExprTest {
+            might_short_circuited,
+            never_short_circuited,
+            op,
         }
     }
 }
 
-impl<'db> SemanticIndexBuilder<'db> {
+impl SemanticIndexBuilder<'_> {
     fn prepare_expr(&mut self, expr: &Expr) -> NodeKey {
         self.with_semantic_checker(|semantic, context| semantic.visit_expr(expr, context));
 
@@ -2461,8 +2491,7 @@ impl<'db> SemanticIndexBuilder<'db> {
             .insert(expr.into(), self.current_scope());
         self.current_ast_ids().record_expression(expr);
 
-        let node_key = NodeKey::from_node(expr);
-        node_key
+        NodeKey::from_node(expr)
     }
 }
 
