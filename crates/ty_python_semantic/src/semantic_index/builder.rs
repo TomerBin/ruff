@@ -1586,8 +1586,7 @@ where
 
                     let elif_predicate = if let Some(elif_test) = clause_test {
                         after_test = self.visit_test_expr(elif_test);
-                        // A test expression is evaluated whether the branch is taken or not
-                        self.flow_merge(after_test.truthy_flow().clone());
+                        self.flow_restore(after_test.truthy_flow().clone());
                         reachability_constraint =
                             self.record_reachability_constraint(last_predicate);
                         let predicate = self.record_expression_narrowing_constraint(elif_test);
