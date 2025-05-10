@@ -7,14 +7,20 @@ Similarly, in `and` expressions, if the left-hand side is falsy, the right-hand 
 evaluated.
 
 ```py
-def _(flag: bool):
-    if flag or (x := 1):
+def _(flag: bool, number: int):
+    if flag and (x := number):
+        # x must be defined here
+        reveal_type(x)  # revealed: int & ~AlwaysFalsy
+    else:
         # error: [possibly-unresolved-reference]
-        reveal_type(x)  # revealed: Literal[1]
+        reveal_type(x)  # revealed: int
 
-    if flag and (x := 1):
+    if flag or (x := number):
         # error: [possibly-unresolved-reference]
-        reveal_type(x)  # revealed: Literal[1]
+        reveal_type(x)  # revealed: int
+    else:
+        # x must be defined here
+        reveal_type(x)  # revealed: int & ~AlwaysTruthy
 ```
 
 ## First expression is always evaluated
