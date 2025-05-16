@@ -2428,7 +2428,11 @@ impl<'db> SemanticIndexBuilder<'db> {
         let mut visibility_constraints = vec![];
 
         for (index, value) in values.iter().enumerate() {
-            self.visit_expr(value);
+            let after_test = self.visit_test_expr(value);
+            self.flow_restore(match op {
+                ast::BoolOp::And => after_test.truthy_flow().clone(),
+                ast::BoolOp::Or => after_test.falsy_flow().clone(),
+            });
 
             for vid in &visibility_constraints {
                 self.record_visibility_constraint_id(*vid);
