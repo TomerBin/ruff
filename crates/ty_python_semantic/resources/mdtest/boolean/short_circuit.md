@@ -194,3 +194,25 @@ def _(flag: bool, number: int):
     # error: [possibly-unresolved-reference]
     reveal_type(x) if flag and (x := number) else None  # revealed: int & ~AlwaysFalsy
 ```
+
+### While Statement
+
+```py
+def _(flag: bool, number: int):
+    while flag and (x := number):
+        # TODO: x must be defined here
+        # error: [possibly-unresolved-reference]
+        reveal_type(x)  # revealed: int & ~AlwaysFalsy
+
+    # error: [possibly-unresolved-reference]
+    reveal_type(x)  # revealed: int
+
+def _(flag: bool, number: int):
+    while flag or (x := number):
+        # error: [possibly-unresolved-reference]
+        reveal_type(x)  # revealed: int
+
+    # TODO: x must be defined here
+    # error: [possibly-unresolved-reference]
+    reveal_type(x)  # revealed: int & ~AlwaysTruthy
+```
