@@ -656,7 +656,7 @@ pub(super) struct FlowSnapshot {
     symbol_states: IndexVec<ScopedSymbolId, SymbolState>,
     instance_attribute_states: IndexVec<ScopedSymbolId, SymbolState>,
     scope_start_visibility: ScopedVisibilityConstraintId,
-    reachability: ScopedVisibilityConstraintId,
+    pub(crate) reachability: ScopedVisibilityConstraintId,
 }
 
 #[derive(Debug)]

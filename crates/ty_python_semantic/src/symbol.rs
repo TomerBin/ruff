@@ -912,6 +912,7 @@ fn symbol_from_declarations_impl<'db>(
         if conflicting.is_empty() {
             let boundness = match undeclared_visibility {
                 Truthiness::AlwaysTrue => {
+                    // println!("{:?}", declarations.peek().unwrap());
                     unreachable!("If we have at least one declaration, the scope-start should not be definitely visible")
                 }
                 Truthiness::AlwaysFalse => Boundness::Bound,

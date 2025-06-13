@@ -435,6 +435,8 @@ impl<'db> SemanticIndexBuilder<'db> {
     }
 
     fn flow_merge(&mut self, state: FlowSnapshot) {
+        println!("path: {:?}", self.file.path(self.db));
+
         self.current_use_def_map_mut().merge(state);
     }
 
@@ -689,7 +691,11 @@ impl<'db> SemanticIndexBuilder<'db> {
         predicate: Predicate<'db>,
     ) -> ScopedVisibilityConstraintId {
         let predicate_id = self.add_predicate(predicate);
-        self.record_reachability_constraint_id(predicate_id)
+        // println!("record predicate {:?}: {:?}", predicate.node, predicate_id);
+        // println!("Use Def Map: {:?}", self.current_use_def_map().);
+        let id = self.record_reachability_constraint_id(predicate_id);
+        // println!("predicate recorded {:?}: {:?}", predicate.node, predicate_id);
+        id
     }
 
     /// Similar to [`Self::record_reachability_constraint`], but takes a [`ScopedPredicateId`].
@@ -1548,17 +1554,40 @@ where
                 }
             }
             ast::Stmt::If(node) => {
+                println!("----------------");
+                println!(
+                    "if - pre-test - {:?}",
+                    self.current_use_def_map().reachability
+                );
                 let mut after_test = self.visit_test_expr(&node.test);
+                println!(
+                    "if - post-test, restore truthy - {:?}",
+                    self.current_use_def_map().reachability
+                );
                 self.flow_restore(after_test.truthy_flow().clone());
                 let mut last_predicate = self.record_expression_narrowing_constraint(&node.test);
                 let mut reachability_constraint =
                     self.record_reachability_constraint(last_predicate);
+                println!(
+                    "record_reachability_constraint {:?}",
+                    reachability_constraint
+                );
                 self.visit_body(&node.body);
+                println!(
+                    "if - post-body - {:?}",
+                    self.current_use_def_map().reachability
+                );
 
                 let visibility_constraint_id = self.record_visibility_constraint(last_predicate);
+                println!(
+                    "record_visibility_constraint {:?}",
+                    visibility_constraint_id
+                );
                 let mut vis_constraints = vec![visibility_constraint_id];
 
                 let mut post_clauses: Vec<FlowSnapshot> = vec![];
+                post_clauses.push(self.flow_snapshot());
+
                 let elif_else_clauses = node
                     .elif_else_clauses
                     .iter()
@@ -1574,19 +1603,31 @@ where
                     // if there's no `else` branch, we should add a no-op `else` branch
                     Some((None, Default::default()))
                 });
+
                 for (clause_test, clause_body) in elif_else_clauses {
+                    println!("if - clause");
                     // snapshot after every block except the last; the last one will just become
                     // the state that we merge the other snapshots into
-                    post_clauses.push(self.flow_snapshot());
+                    // println!("if - post_clauses snapshot");
+
+                    // post_clauses.push(after_test.falsy_flow().clone());
                     // we can only take an elif/else branch if none of the previous ones were
                     // taken
+
+                    println!("if - restore falsy");
                     self.flow_restore(after_test.falsy_flow().clone());
+                    println!(
+                        "record_negated_reachability_constraint {:?}",
+                        reachability_constraint
+                    );
                     self.record_negated_narrowing_constraint(last_predicate);
                     self.record_negated_reachability_constraint(reachability_constraint);
 
                     let elif_predicate = if let Some(elif_test) = clause_test {
+                        println!("if - visit elif test");
                         after_test = self.visit_test_expr(elif_test);
                         self.flow_restore(after_test.truthy_flow().clone());
+                        println!("if - record_reachability_constraint");
                         reachability_constraint =
                             self.record_reachability_constraint(last_predicate);
                         let predicate = self.record_expression_narrowing_constraint(elif_test);
@@ -1594,22 +1635,37 @@ where
                     } else {
                         None
                     };
-
+                    if clause_body.is_empty() {
+                        println!("if - visit empty body");
+                    } else {
+                        println!("if - visit elif body");
+                    }
                     self.visit_body(clause_body);
 
                     for id in &vis_constraints {
+                        println!("record_negated_visibility_constraint {:?}", id);
                         self.record_negated_visibility_constraint(*id);
                     }
                     if let Some(elif_predicate) = elif_predicate {
                         last_predicate = elif_predicate;
                         let id = self.record_visibility_constraint(elif_predicate);
+                        println!("elif record_visibility_constraint {:?}", id);
                         vis_constraints.push(id);
                     }
+                    post_clauses.push(self.flow_snapshot());
                 }
-
-                for post_clause_state in post_clauses {
+                println!(
+                    "if - pre merge - {:?}",
+                    self.current_use_def_map().reachability
+                );
+                for post_clause_state in post_clauses.clone() {
+                    println!("if - merge with - {:?}", post_clause_state.reachability);
                     self.flow_merge(post_clause_state);
                 }
+                println!(
+                    "if - post merge - {:?}",
+                    self.current_use_def_map().reachability
+                );
 
                 self.simplify_visibility_constraints(after_test.flow().clone());
             }
@@ -2208,7 +2264,7 @@ where
                 range: _,
                 op,
             }) => {
-                self.visit_bool_op_expr(values, *op);
+                self.visit_bool_op_expr(values, *op, false);
             }
             ast::Expr::Attribute(ast::ExprAttribute {
                 value: object,
@@ -2410,7 +2466,9 @@ impl<'db> SemanticIndexBuilder<'db> {
                 op,
             }) => {
                 self.prepare_expr(test_expr);
-                self.visit_bool_op_expr(values, *op)
+                // TODO: Dont use unwrap
+                self.visit_bool_op_expr(values, *op, true).unwrap()
+                // TestFlowSnapshots::Default(self.flow_snapshot())
             }
             _ => {
                 self.visit_expr(test_expr);
@@ -2421,18 +2479,19 @@ impl<'db> SemanticIndexBuilder<'db> {
 }
 
 impl<'db> SemanticIndexBuilder<'db> {
-    fn visit_bool_op_expr(&mut self, values: &'db [Expr], op: BoolOp) -> TestFlowSnapshots {
+    fn visit_bool_op_expr(
+        &mut self,
+        values: &'db [Expr],
+        op: BoolOp,
+        track_flow: bool,
+    ) -> Option<TestFlowSnapshots> {
         let pre_op = self.flow_snapshot();
 
-        let mut short_circuits = vec![];
+        let mut snapshots = vec![];
         let mut visibility_constraints = vec![];
 
         for (index, value) in values.iter().enumerate() {
-            let after_test = self.visit_test_expr(value);
-            self.flow_restore(match op {
-                ast::BoolOp::And => after_test.truthy_flow().clone(),
-                ast::BoolOp::Or => after_test.falsy_flow().clone(),
-            });
+            self.visit_expr(value);
 
             for vid in &visibility_constraints {
                 self.record_visibility_constraint_id(*vid);
@@ -2460,7 +2519,7 @@ impl<'db> SemanticIndexBuilder<'db> {
                     self.record_visibility_constraint_id(*vid);
                 }
                 self.record_negated_visibility_constraint(visibility_constraint);
-                short_circuits.push(self.flow_snapshot());
+                snapshots.push(self.flow_snapshot());
 
                 // Then we model the non-short-circuiting behavior. Here, we need to delay
                 // the application of the visibility constraint until after the expression
@@ -2471,18 +2530,19 @@ impl<'db> SemanticIndexBuilder<'db> {
                 visibility_constraints.push(visibility_constraint);
             }
         }
-        let never_short_circuited = self.flow_snapshot();
-        for snapshot in short_circuits.clone() {
+        let pre_merge = self.flow_snapshot();
+        for snapshot in snapshots {
             self.flow_merge(snapshot);
         }
-        let might_short_circuited = self.flow_snapshot();
-
         self.simplify_visibility_constraints(pre_op);
-        TestFlowSnapshots::BooleanExprTest {
-            might_short_circuited,
-            never_short_circuited,
+        let s = self.flow_snapshot();
+        Some(TestFlowSnapshots::BooleanExprTest {
+            might_short_circuited: s,
+            never_short_circuited: pre_merge,
+            // might_short_circuited: s.clone(),
+            // never_short_circuited: s,
             op,
-        }
+        })
     }
 }
 

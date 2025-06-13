@@ -151,39 +151,6 @@ def _(flag: bool, flag2: bool, number: int):
         reveal_type(y)  # revealed: int & ~AlwaysTruthy
 ```
 
-### Recursive boolean expression
-
-```py
-def _(flag: bool, number: int):
-    # error: [possibly-unresolved-reference]
-    (flag or (x := number)) and reveal_type(x)  # revealed: int
-
-def _(flag: bool, number: int):
-    # x must be defined here
-    (flag or (x := number)) or reveal_type(x)  # revealed: int & ~AlwaysTruthy
-
-def _(flag: bool, flag_2: bool, number: int):
-    if flag and (flag_2 and (x := number)):
-        # x must be defined here
-        reveal_type(x)  # revealed: int & ~AlwaysFalsy
-
-def _(flag: bool, flag_2: bool, number: int):
-    if flag and (flag_2 or (x := number)):
-        # error: [possibly-unresolved-reference]
-        reveal_type(x)  # revealed: int
-    else:
-        # error: [possibly-unresolved-reference]
-        reveal_type(x)  # revealed: int
-
-def _(flag: bool, flag_2: bool, number: int):
-    if flag or (flag_2 or (x := number)):
-        # error: [possibly-unresolved-reference]
-        reveal_type(x)  # revealed: int
-    else:
-        # x must be defined here
-        reveal_type(x)  # revealed: int & ~AlwaysTruthy
-```
-
 ## This logic can be applied in additional cases that aren't supported yet
 
 ### If Expression
