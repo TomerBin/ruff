@@ -1,0 +1,6 @@
+from __future__ import annotations
+
+if True and False:
+    ...
+if False and True:
+    ...
