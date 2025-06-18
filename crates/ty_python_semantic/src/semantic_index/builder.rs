@@ -1097,7 +1097,7 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
                     .record_reachability_constraint(*id); // TODO: nicer API
             }
 
-            self.visit_test_expr(value);
+            self.visit_expr(value);
 
             // For the last value, we don't need to model control flow. There is no short-circuiting
             // anymore.
@@ -1126,6 +1126,7 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
                 // has been evaluated, so we only push it onto the stack here.
                 self.flow_restore(after_expr);
                 self.record_narrowing_constraint_id(predicate_id);
+                self.record_reachability_constraint_id(predicate_id);
                 reachability_constraints.push(reachability_constraint);
             }
         }
@@ -1136,8 +1137,9 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
         }
         let might_short_circuited = self.flow_snapshot();
 
-        // self.simplify_visibility_constraints(pre_op); ???
         TestFlowSnapshots::BooleanExprTest {
+            // might_short_circuited: might_short_circuited.clone(),
+            // never_short_circuited: might_short_circuited,
             might_short_circuited,
             never_short_circuited,
             op,
@@ -1566,14 +1568,21 @@ impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
                 }
             }
             ast::Stmt::If(node) => {
+                println!("{:?} ------------------", self.file.path(self.db));
+                println!("pre test {:?}", self.current_use_def_map().reachability);
                 let mut after_test = self.visit_test_expr(&node.test);
                 self.flow_restore(after_test.truthy_flow().clone());
                 let mut last_predicate = self.record_expression_narrowing_constraint(&node.test);
                 let mut last_reachability_constraint =
                     self.record_reachability_constraint(last_predicate);
+                println!(
+                    "after truthy test, visit body {:?}",
+                    self.current_use_def_map().reachability
+                );
                 self.visit_body(&node.body);
-
                 let mut post_clauses: Vec<FlowSnapshot> = vec![];
+                println!("after body {:?}", self.current_use_def_map().reachability);
+
                 let elif_else_clauses = node
                     .elif_else_clauses
                     .iter()
@@ -1596,11 +1605,15 @@ impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
                     // we can only take an elif/else branch if none of the previous ones were
                     // taken
                     self.flow_restore(after_test.falsy_flow().clone());
-
                     self.record_negated_narrowing_constraint(last_predicate);
                     self.record_negated_reachability_constraint(last_reachability_constraint);
+                    println!(
+                        "restored to falsy {:?}",
+                        self.current_use_def_map().reachability
+                    );
 
                     if let Some(elif_test) = clause_test {
+                        println!("visit elif {:?}", self.current_use_def_map().reachability);
                         after_test = self.visit_test_expr(elif_test);
                         self.flow_restore(after_test.truthy_flow().clone());
 
@@ -1609,13 +1622,25 @@ impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
                         last_reachability_constraint =
                             self.record_reachability_constraint(last_predicate);
                     }
-
+                    if (clause_body.len() > 0) {
+                        println!(
+                            "visit elif body {:?}",
+                            self.current_use_def_map().reachability
+                        );
+                    }
                     self.visit_body(clause_body);
+                    post_clauses.push(self.flow_snapshot());
                 }
-
                 for post_clause_state in post_clauses {
+                    println!(
+                        "merging {:?} into {:?}",
+                        post_clause_state.reachability,
+                        self.current_use_def_map().reachability
+                    );
                     self.flow_merge(post_clause_state);
+                    println!("after {:?}", self.current_use_def_map().reachability);
                 }
+                println!("-------------------------------");
             }
             ast::Stmt::While(ast::StmtWhile {
                 test,
@@ -2194,18 +2219,33 @@ impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
             ast::Expr::If(ast::ExprIf {
                 body, test, orelse, ..
             }) => {
-                self.visit_expr(test);
-                let pre_if = self.flow_snapshot();
+                println!("expr::if ----------------------------------");
+                println!("pre test {:?}", self.current_use_def_map().reachability);
+                let after_test = self.visit_test_expr(test);
+                println!("after test {:?}", self.current_use_def_map().reachability);
                 let predicate = self.record_expression_narrowing_constraint(test);
                 let reachability_constraint = self.record_reachability_constraint(predicate);
+                self.flow_restore(after_test.truthy_flow().clone());
+                println!(
+                    "restore truthy {:?}",
+                    self.current_use_def_map().reachability
+                );
+                println!("truthy {:?}", self.current_use_def_map().reachability);
                 self.visit_expr(body);
                 let post_body = self.flow_snapshot();
-                self.flow_restore(pre_if);
+                self.flow_restore(after_test.falsy_flow().clone());
+                println!(
+                    "restore falsy {:?}",
+                    self.current_use_def_map().reachability
+                );
 
                 self.record_negated_narrowing_constraint(predicate);
                 self.record_negated_reachability_constraint(reachability_constraint);
+                println!("falsy {:?}", self.current_use_def_map().reachability);
                 self.visit_expr(orelse);
                 self.flow_merge(post_body);
+                println!("after merge {:?}", self.current_use_def_map().reachability);
+                println!("expr::if END ----------------------------------");
             }
             ast::Expr::ListComp(
                 list_comprehension @ ast::ExprListComp {
