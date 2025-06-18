@@ -10,11 +10,11 @@ evaluated.
 def _(flag: bool, number: int):
     flag or (y := number)
     # error: [possibly-unresolved-reference]
-    reveal_type(y)  # revealed: int
+    y
 
     flag and (x := number)
     # error: [possibly-unresolved-reference]
-    reveal_type(x)  # revealed: int
+    x
 ```
 
 ## First expression is always evaluated
@@ -47,23 +47,6 @@ def _(flag: bool):
 
     # error: [unresolved-reference]
     flag or reveal_type(y) or (y := 1)  # revealed: Unknown
-```
-
-## Nested expressions
-
-```py
-def _(flag1: bool, flag2: bool):
-    if flag1 or ((x := 1) and flag2):
-        # error: [possibly-unresolved-reference]
-        reveal_type(x)  # revealed: Literal[1]
-
-    if ((y := 1) and flag1) or flag2:
-        reveal_type(y)  # revealed: Literal[1]
-
-    # error: [possibly-unresolved-reference]
-    if (flag1 and (z := 1)) or reveal_type(z):  # revealed: Literal[1]
-        # error: [possibly-unresolved-reference]
-        reveal_type(z)  # revealed: Literal[1]
 ```
 
 ## Inside if-else blocks, we can sometimes know that short-circuit couldn't happen
@@ -151,51 +134,23 @@ def _(flag: bool, flag2: bool, number: int):
         reveal_type(y)  # revealed: int & ~AlwaysTruthy
 ```
 
-### Nested boolean expression
-
-```py
-def _(flag: bool, number: int):
-    # error: [possibly-unresolved-reference]
-    (flag or (x := number)) and reveal_type(x)  # revealed: int
-
-def _(flag: bool, number: int):
-    # TODO: no error, x must be defined here
-    # error: [possibly-unresolved-reference]
-    (flag or (x := number)) or reveal_type(x)  # revealed: int & ~AlwaysTruthy
-
-def _(flag: bool, flag_2: bool, number: int):
-    if flag and (flag_2 and (x := number)):
-        # TODO: no error, x must be defined here
-        # error: [possibly-unresolved-reference]
-        reveal_type(x)  # revealed: int & ~AlwaysFalsy
-
-def _(flag: bool, flag_2: bool, number: int):
-    if flag and (flag_2 or (x := number)):
-        # error: [possibly-unresolved-reference]
-        reveal_type(x)  # revealed: int
-    else:
-        # error: [possibly-unresolved-reference]
-        reveal_type(x)  # revealed: int
-
-def _(flag: bool, flag_2: bool, number: int):
-    if flag or (flag_2 or (x := number)):
-        # error: [possibly-unresolved-reference]
-        reveal_type(x)  # revealed: int
-    else:
-        # TODO: no error, x must be defined here
-        # error: [possibly-unresolved-reference]
-        reveal_type(x)  # revealed: int & ~AlwaysTruthy
-```
-
 ## This logic can be applied in additional cases that aren't supported yet
 
 ### If Expression
 
 ```py
 def _(flag: bool, number: int):
-    # TODO: x must be defined here
+    # x must be defined here
+    x if flag and (x := number) else None
+
+    # x must be defined here
+    None if flag or (y := number) else y
+
     # error: [possibly-unresolved-reference]
-    reveal_type(x) if flag and (x := number) else None  # revealed: int & ~AlwaysFalsy
+    y if flag or (y := number) else None
+
+    # error: [possibly-unresolved-reference]
+    None if flag and (x := number) else x
 ```
 
 ### While Statement

@@ -811,7 +811,7 @@ struct ReachableDefinitions {
 pub(super) struct FlowSnapshot {
     symbol_states: IndexVec<ScopedSymbolId, PlaceState>,
     member_states: IndexVec<ScopedMemberId, PlaceState>,
-    reachability: ScopedReachabilityConstraintId,
+    pub(crate) reachability: ScopedReachabilityConstraintId,
 }
 
 #[derive(Debug)]
