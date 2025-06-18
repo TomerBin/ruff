@@ -75,13 +75,16 @@ enum TestFlowSnapshots {
         never_short_circuited: FlowSnapshot,
         op: BoolOp,
     },
-    Default(FlowSnapshot),
+    Expr {
+        falsy: FlowSnapshot,
+        truthy: FlowSnapshot,
+    },
 }
 
 impl TestFlowSnapshots {
     fn falsy_flow(&self) -> &FlowSnapshot {
         match self {
-            TestFlowSnapshots::Default(flow_control) => flow_control,
+            TestFlowSnapshots::Expr { falsy, truthy } => falsy,
             TestFlowSnapshots::BooleanExprTest {
                 might_short_circuited: might_short_circuit,
                 never_short_circuited: no_short_circuit,
@@ -95,7 +98,7 @@ impl TestFlowSnapshots {
 
     fn truthy_flow(&self) -> &FlowSnapshot {
         match self {
-            TestFlowSnapshots::Default(flow_control) => flow_control,
+            TestFlowSnapshots::Expr { falsy, truthy } => truthy,
             TestFlowSnapshots::BooleanExprTest {
                 might_short_circuited: might_short_circuit,
                 never_short_circuited: no_short_circuit,
@@ -1088,54 +1091,63 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
     }
 
     fn visit_bool_op_expr(&mut self, values: &'ast [Expr], op: BoolOp) -> TestFlowSnapshots {
+        println!("visit_bool_op_expr ----------------- ");
         let mut short_circuits = vec![];
-        let mut reachability_constraints = vec![];
 
         for (index, value) in values.iter().enumerate() {
-            for id in &reachability_constraints {
-                self.current_use_def_map_mut()
-                    .record_reachability_constraint(*id); // TODO: nicer API
-            }
-
+            // println!("visit_bool_op_expr elem {:?} {:?}", index, self.current_use_def_map().reachability);
             self.visit_expr(value);
 
             // For the last value, we don't need to model control flow. There is no short-circuiting
             // anymore.
-            if index < values.len() - 1 {
-                let predicate = self.build_predicate(value);
-                let predicate_id = match op {
-                    ast::BoolOp::And => self.add_predicate(predicate),
-                    ast::BoolOp::Or => self.add_negated_predicate(predicate),
-                };
-                let reachability_constraint = self
-                    .current_reachability_constraints_mut()
-                    .add_atom(predicate_id);
+            let predicate = self.build_predicate(value);
+            let after_expr = self.flow_snapshot();
+            let predicate_id = match op {
+                ast::BoolOp::And => self.add_predicate(predicate),
+                ast::BoolOp::Or => self.add_negated_predicate(predicate),
+            };
+            let reachability_constraint = self
+                .current_reachability_constraints_mut()
+                .add_atom(predicate_id);
 
-                let after_expr = self.flow_snapshot();
+            // We first model the short-circuiting behavior. We take the short-circuit
+            // path here if all of the previous short-circuit paths were not taken, so
+            // we record all previously existing reachability constraints, and negate the
+            // one for the current expression.
 
-                // We first model the short-circuiting behavior. We take the short-circuit
-                // path here if all of the previous short-circuit paths were not taken, so
-                // we record all previously existing reachability constraints, and negate the
-                // one for the current expression.
+            self.record_negated_reachability_constraint(reachability_constraint);
+            short_circuits.push(self.flow_snapshot());
 
-                self.record_negated_reachability_constraint(reachability_constraint);
-                short_circuits.push(self.flow_snapshot());
+            // Then we model the non-short-circuiting behavior. Here, we need to delay
+            // the application of the reachability constraint until after the expression
+            // has been evaluated, so we only push it onto the stack here.
+            self.flow_restore(after_expr);
 
-                // Then we model the non-short-circuiting behavior. Here, we need to delay
-                // the application of the reachability constraint until after the expression
-                // has been evaluated, so we only push it onto the stack here.
-                self.flow_restore(after_expr);
-                self.record_narrowing_constraint_id(predicate_id);
-                self.record_reachability_constraint_id(predicate_id);
-                reachability_constraints.push(reachability_constraint);
-            }
+            self.record_narrowing_constraint_id(predicate_id);
+            self.record_reachability_constraint_id(predicate_id);
+            // println!("after non-short-circuit {:?} {:?}", index, self.current_use_def_map().reachability);
         }
 
         let never_short_circuited = self.flow_snapshot();
+
+        self.flow_restore(short_circuits.remove(0));
         for snapshot in short_circuits {
             self.flow_merge(snapshot);
         }
         let might_short_circuited = self.flow_snapshot();
+
+        self.flow_merge(never_short_circuited.clone());
+
+        println!(
+            "Might short circuit - {:?}",
+            might_short_circuited.reachability
+        );
+        println!(
+            "Never short circuit - {:?}",
+            never_short_circuited.reachability
+        );
+        println!("Merged - {:?}", self.current_use_def_map().reachability);
+        println!("visit_bool_op_expr END ----------------- ");
 
         TestFlowSnapshots::BooleanExprTest {
             // might_short_circuited: might_short_circuited.clone(),
@@ -1159,7 +1171,16 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
             }
             _ => {
                 self.visit_expr(test_expr);
-                TestFlowSnapshots::Default(self.flow_snapshot())
+                let after_expr = self.flow_snapshot();
+                let predicate = self.build_predicate(test_expr);
+                self.record_narrowing_constraint(predicate);
+                let reach = self.record_reachability_constraint(predicate);
+                let truthy = self.flow_snapshot();
+                self.flow_restore(after_expr);
+                self.record_negated_narrowing_constraint(predicate);
+                self.record_negated_reachability_constraint(reach);
+                let falsy = self.flow_snapshot();
+                TestFlowSnapshots::Expr { falsy, truthy }
             }
         }
     }
@@ -2223,24 +2244,24 @@ impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
                 println!("pre test {:?}", self.current_use_def_map().reachability);
                 let after_test = self.visit_test_expr(test);
                 println!("after test {:?}", self.current_use_def_map().reachability);
-                let predicate = self.record_expression_narrowing_constraint(test);
-                let reachability_constraint = self.record_reachability_constraint(predicate);
                 self.flow_restore(after_test.truthy_flow().clone());
                 println!(
-                    "restore truthy {:?}",
+                    "restored truthy {:?}",
                     self.current_use_def_map().reachability
                 );
+                // let predicate = self.record_expression_narrowing_constraint(test);
+                // let reachability_constraint = self.record_reachability_constraint(predicate);
                 println!("truthy {:?}", self.current_use_def_map().reachability);
                 self.visit_expr(body);
                 let post_body = self.flow_snapshot();
                 self.flow_restore(after_test.falsy_flow().clone());
                 println!(
-                    "restore falsy {:?}",
+                    "restored falsy {:?}",
                     self.current_use_def_map().reachability
                 );
 
-                self.record_negated_narrowing_constraint(predicate);
-                self.record_negated_reachability_constraint(reachability_constraint);
+                // self.record_negated_narrowing_constraint(predicate);
+                // self.record_negated_reachability_constraint(reachability_constraint);
                 println!("falsy {:?}", self.current_use_def_map().reachability);
                 self.visit_expr(orelse);
                 self.flow_merge(post_body);
