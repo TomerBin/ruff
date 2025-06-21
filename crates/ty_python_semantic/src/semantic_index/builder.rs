@@ -1,9 +1,4 @@
-use std::cell::{OnceCell, RefCell};
-use std::sync::Arc;
-
 use except_handlers::TryNodeContextStackManager;
-use rustc_hash::{FxHashMap, FxHashSet};
-
 use ruff_db::files::File;
 use ruff_db::parsed::ParsedModuleRef;
 use ruff_db::source::{SourceText, source_text};
@@ -16,6 +11,9 @@ use ruff_python_parser::semantic_errors::{
     SemanticSyntaxChecker, SemanticSyntaxContext, SemanticSyntaxError, SemanticSyntaxErrorKind,
 };
 use ruff_text_size::TextRange;
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::cell::{OnceCell, RefCell};
+use std::sync::Arc;
 
 use crate::ast_node_ref::AstNodeRef;
 use crate::module_name::ModuleName;
@@ -74,11 +72,6 @@ struct ScopeInfo {
 }
 
 enum TestFlowSnapshots {
-    BooleanExprTest {
-        might_short_circuited: FlowSnapshot,
-        never_short_circuited: FlowSnapshot,
-        op: BoolOp,
-    },
     Expr {
         falsy: FlowSnapshot,
         truthy: FlowSnapshot,
@@ -88,29 +81,13 @@ enum TestFlowSnapshots {
 impl TestFlowSnapshots {
     fn falsy_flow(&self) -> &FlowSnapshot {
         match self {
-            TestFlowSnapshots::Expr { falsy, truthy } => falsy,
-            TestFlowSnapshots::BooleanExprTest {
-                might_short_circuited: might_short_circuit,
-                never_short_circuited: no_short_circuit,
-                op,
-            } => match op {
-                BoolOp::And => might_short_circuit,
-                BoolOp::Or => no_short_circuit,
-            },
+            TestFlowSnapshots::Expr { falsy, truthy: _ } => falsy,
         }
     }
 
     fn truthy_flow(&self) -> &FlowSnapshot {
         match self {
-            TestFlowSnapshots::Expr { falsy, truthy } => truthy,
-            TestFlowSnapshots::BooleanExprTest {
-                might_short_circuited: might_short_circuit,
-                never_short_circuited: no_short_circuit,
-                op,
-            } => match op {
-                BoolOp::And => no_short_circuit,
-                BoolOp::Or => might_short_circuit,
-            },
+            TestFlowSnapshots::Expr { falsy: _, truthy } => truthy,
         }
     }
 }
@@ -1289,55 +1266,48 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
     }
 
     fn visit_bool_op_expr(&mut self, values: &'ast [Expr], op: BoolOp) -> TestFlowSnapshots {
-        let mut short_circuits = vec![];
+        match op {
+            // TODO: Unify And and Or flows, currently separated for easier debugging.
+            BoolOp::And => {
+                let mut falsy_snapshots = vec![];
 
-        for value in values.iter() {
-            self.visit_expr(value);
+                for value in values {
+                    let after_test = self.visit_test_expr(value);
+                    falsy_snapshots.push(after_test.falsy_flow().clone());
+                    self.flow_restore(after_test.truthy_flow().clone());
+                }
 
-            // For the last value, we don't need to model control flow. There is no short-circuiting
-            // anymore.
-            let predicate = self.build_predicate(value);
-            let after_expr = self.flow_snapshot();
-            let predicate_id = match op {
-                ast::BoolOp::And => self.add_predicate(predicate),
-                ast::BoolOp::Or => self.add_negated_predicate(predicate),
-            };
-            let reachability_constraint = self
-                .current_reachability_constraints_mut()
-                .add_atom(predicate_id);
+                let truthy = self.flow_snapshot();
 
-            // We first model the short-circuiting behavior. We take the short-circuit
-            // path here if all of the previous short-circuit paths were not taken, so
-            // we record all previously existing reachability constraints, and negate the
-            // one for the current expression.
+                self.flow_restore(falsy_snapshots.remove(0));
+                for snapshot in falsy_snapshots {
+                    self.flow_merge(snapshot);
+                }
 
-            self.record_negated_reachability_constraint(reachability_constraint);
-            short_circuits.push(self.flow_snapshot());
+                let falsy = self.flow_snapshot();
 
-            // Then we model the non-short-circuiting behavior. Here, we need to delay
-            // the application of the reachability constraint until after the expression
-            // has been evaluated, so we only push it onto the stack here.
-            self.flow_restore(after_expr);
+                self.flow_merge(truthy.clone());
 
-            self.record_narrowing_constraint_id(predicate_id);
-            self.record_reachability_constraint_id(predicate_id);
-        }
+                TestFlowSnapshots::Expr { truthy, falsy }
+            }
+            BoolOp::Or => {
+                let mut truthy_snapshots = vec![];
+                for value in values {
+                    let after_test = self.visit_test_expr(value);
+                    truthy_snapshots.push(after_test.truthy_flow().clone());
+                    self.flow_restore(after_test.falsy_flow().clone());
+                }
+                let falsy = self.flow_snapshot();
 
-        let never_short_circuited = self.flow_snapshot();
+                self.flow_restore(truthy_snapshots.remove(0));
+                for snapshot in truthy_snapshots {
+                    self.flow_merge(snapshot);
+                }
+                let truthy = self.flow_snapshot();
+                self.flow_merge(falsy.clone());
 
-        self.flow_restore(short_circuits.remove(0));
-        for snapshot in short_circuits {
-            self.flow_merge(snapshot);
-        }
-
-        let might_short_circuited = self.flow_snapshot();
-
-        self.flow_merge(never_short_circuited.clone());
-
-        TestFlowSnapshots::BooleanExprTest {
-            might_short_circuited,
-            never_short_circuited,
-            op,
+                TestFlowSnapshots::Expr { truthy, falsy }
+            }
         }
     }
 
@@ -1351,7 +1321,6 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
                 node_index: _,
             }) => {
                 self.prepare_expr(test_expr);
-
                 self.visit_bool_op_expr(values, *op)
             }
             _ => {
@@ -1364,9 +1333,12 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
                 let truthy = self.flow_snapshot();
 
                 self.flow_restore(after_expr);
-                self.record_negated_narrowing_constraint(predicate);
+
+                self.record_narrowing_constraint(predicate.negated());
                 self.record_negated_reachability_constraint(reach);
                 let falsy = self.flow_snapshot();
+
+                self.flow_merge(truthy.clone());
 
                 TestFlowSnapshots::Expr { falsy, truthy }
             }
@@ -1712,7 +1684,6 @@ impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
 
             ast::Stmt::Assign(node) => {
                 debug_assert_eq!(&self.current_assignments, &[]);
-
                 self.visit_expr(&node.value);
                 let value = self.add_standalone_assigned_expression(&node.value, node);
 
@@ -1809,6 +1780,7 @@ impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
             }
             ast::Stmt::If(node) => {
                 let mut after_test = self.visit_test_expr(&node.test);
+
                 self.flow_restore(after_test.truthy_flow().clone());
                 let is_outer_block_in_type_checking = self.in_type_checking_block;
 
