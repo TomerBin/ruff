@@ -643,7 +643,7 @@ impl std::iter::FusedIterator for DeclarationsIterator<'_, '_> {}
 #[derive(Clone, Debug)]
 pub(super) struct FlowSnapshot {
     place_states: IndexVec<ScopedPlaceId, PlaceState>,
-    reachability: ScopedReachabilityConstraintId,
+    pub(crate) reachability: ScopedReachabilityConstraintId,
 }
 
 #[derive(Debug)]

@@ -9,8 +9,7 @@ use crate::semantic_index::predicate::{
 use crate::types::function::KnownFunction;
 use crate::types::infer::infer_same_file_expression_type;
 use crate::types::{
-    IntersectionBuilder, KnownClass, SubclassOfType, Truthiness, Type, UnionBuilder,
-    infer_expression_types,
+    IntersectionBuilder, KnownClass, SubclassOfType, Type, UnionBuilder, infer_expression_types,
 };
 
 use ruff_db::parsed::{ParsedModuleRef, parsed_module};
@@ -18,7 +17,6 @@ use ruff_python_stdlib::identifiers::is_identifier;
 
 use itertools::Itertools;
 use ruff_python_ast as ast;
-use ruff_python_ast::{BoolOp, ExprBoolOp};
 use rustc_hash::FxHashMap;
 use std::collections::hash_map::Entry;
 
@@ -199,26 +197,6 @@ impl ClassInfoConstraintFunction {
 
 type NarrowingConstraints<'db> = FxHashMap<ScopedPlaceId, Type<'db>>;
 
-fn merge_constraints_and<'db>(
-    into: &mut NarrowingConstraints<'db>,
-    from: NarrowingConstraints<'db>,
-    db: &'db dyn Db,
-) {
-    for (key, value) in from {
-        match into.entry(key) {
-            Entry::Occupied(mut entry) => {
-                *entry.get_mut() = IntersectionBuilder::new(db)
-                    .add_positive(*entry.get())
-                    .add_positive(value)
-                    .build();
-            }
-            Entry::Vacant(entry) => {
-                entry.insert(value);
-            }
-        }
-    }
-}
-
 fn merge_constraints_or<'db>(
     into: &mut NarrowingConstraints<'db>,
     from: &NarrowingConstraints<'db>,
@@ -325,7 +303,6 @@ impl<'db, 'ast> NarrowingConstraintsBuilder<'db, 'ast> {
             ast::Expr::UnaryOp(unary_op) if unary_op.op == ast::UnaryOp::Not => {
                 self.evaluate_expression_node_predicate(&unary_op.operand, expression, !is_positive)
             }
-            ast::Expr::BoolOp(bool_op) => self.evaluate_bool_op(bool_op, expression, is_positive),
             ast::Expr::Named(expr_named) => self.evaluate_expr_named(expr_named, is_positive),
             _ => None,
         }
@@ -868,58 +845,5 @@ impl<'db, 'ast> NarrowingConstraintsBuilder<'db, 'ast> {
                 merge_constraints_or(&mut constraints, &constraints_, db);
                 constraints
             })
-    }
-
-    fn evaluate_bool_op(
-        &mut self,
-        expr_bool_op: &ExprBoolOp,
-        expression: Expression<'db>,
-        is_positive: bool,
-    ) -> Option<NarrowingConstraints<'db>> {
-        let inference = infer_expression_types(self.db, expression);
-        let scope = self.scope();
-        let mut sub_constraints = expr_bool_op
-            .values
-            .iter()
-            // filter our arms with statically known truthiness
-            .filter(|expr| {
-                inference
-                    .expression_type(expr.scoped_expression_id(self.db, scope))
-                    .bool(self.db)
-                    != match expr_bool_op.op {
-                        BoolOp::And => Truthiness::AlwaysTrue,
-                        BoolOp::Or => Truthiness::AlwaysFalse,
-                    }
-            })
-            .map(|sub_expr| {
-                self.evaluate_expression_node_predicate(sub_expr, expression, is_positive)
-            })
-            .collect::<Vec<_>>();
-        match (expr_bool_op.op, is_positive) {
-            (BoolOp::And, true) | (BoolOp::Or, false) => {
-                let mut aggregation: Option<NarrowingConstraints> = None;
-                for sub_constraint in sub_constraints.into_iter().flatten() {
-                    if let Some(ref mut some_aggregation) = aggregation {
-                        merge_constraints_and(some_aggregation, sub_constraint, self.db);
-                    } else {
-                        aggregation = Some(sub_constraint);
-                    }
-                }
-                aggregation
-            }
-            (BoolOp::Or, true) | (BoolOp::And, false) => {
-                let (first, rest) = sub_constraints.split_first_mut()?;
-                if let Some(first) = first {
-                    for rest_constraint in rest {
-                        if let Some(rest_constraint) = rest_constraint {
-                            merge_constraints_or(first, rest_constraint, self.db);
-                        } else {
-                            return None;
-                        }
-                    }
-                }
-                first.clone()
-            }
-        }
     }
 }

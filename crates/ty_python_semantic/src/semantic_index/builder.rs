@@ -1,20 +1,18 @@
-use std::cell::{OnceCell, RefCell};
-use std::sync::Arc;
-
 use except_handlers::TryNodeContextStackManager;
-use rustc_hash::{FxHashMap, FxHashSet};
-
 use ruff_db::files::File;
 use ruff_db::parsed::ParsedModuleRef;
 use ruff_db::source::{SourceText, source_text};
 use ruff_index::IndexVec;
 use ruff_python_ast::name::Name;
 use ruff_python_ast::visitor::{Visitor, walk_expr, walk_pattern, walk_stmt};
-use ruff_python_ast::{self as ast, PySourceType, PythonVersion};
+use ruff_python_ast::{self as ast, BoolOp, Expr, PySourceType, PythonVersion};
 use ruff_python_parser::semantic_errors::{
     SemanticSyntaxChecker, SemanticSyntaxContext, SemanticSyntaxError, SemanticSyntaxErrorKind,
 };
 use ruff_text_size::TextRange;
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::cell::{OnceCell, RefCell};
+use std::sync::Arc;
 
 use crate::ast_node_ref::AstNodeRef;
 use crate::module_name::ModuleName;
@@ -67,6 +65,27 @@ struct ScopeInfo {
     file_scope_id: FileScopeId,
     /// Current loop state; None if we are not currently visiting a loop
     current_loop: Option<Loop>,
+}
+
+enum TestFlowSnapshots {
+    Expr {
+        falsy: FlowSnapshot,
+        truthy: FlowSnapshot,
+    },
+}
+
+impl TestFlowSnapshots {
+    fn falsy_flow(&self) -> &FlowSnapshot {
+        match self {
+            TestFlowSnapshots::Expr { falsy, truthy: _ } => falsy,
+        }
+    }
+
+    fn truthy_flow(&self) -> &FlowSnapshot {
+        match self {
+            TestFlowSnapshots::Expr { falsy: _, truthy } => truthy,
+        }
+    }
 }
 
 pub(super) struct SemanticIndexBuilder<'db, 'ast> {
@@ -1047,6 +1066,96 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
         self.source_text
             .get_or_init(|| source_text(self.db.upcast(), self.file))
     }
+
+    fn visit_bool_op_expr(&mut self, values: &'ast [Expr], op: BoolOp) -> TestFlowSnapshots {
+        match op {
+            // TODO: Unify And and Or flows, currently separated for easier debugging.
+            BoolOp::And => {
+                let mut falsy_snapshots = vec![];
+
+                for value in values {
+                    let after_test = self.visit_test_expr(value);
+                    falsy_snapshots.push(after_test.falsy_flow().clone());
+                    self.flow_restore(after_test.truthy_flow().clone());
+                }
+
+                let truthy = self.flow_snapshot();
+
+                self.flow_restore(falsy_snapshots.remove(0));
+                for snapshot in falsy_snapshots {
+                    self.flow_merge(snapshot);
+                }
+
+                let falsy = self.flow_snapshot();
+
+                self.flow_merge(truthy.clone());
+
+                TestFlowSnapshots::Expr { truthy, falsy }
+            }
+            BoolOp::Or => {
+                let mut truthy_snapshots = vec![];
+                for value in values {
+                    let after_test = self.visit_test_expr(value);
+                    truthy_snapshots.push(after_test.truthy_flow().clone());
+                    self.flow_restore(after_test.falsy_flow().clone());
+                }
+                let falsy = self.flow_snapshot();
+
+                self.flow_restore(truthy_snapshots.remove(0));
+                for snapshot in truthy_snapshots {
+                    self.flow_merge(snapshot);
+                }
+                let truthy = self.flow_snapshot();
+                self.flow_merge(falsy.clone());
+
+                TestFlowSnapshots::Expr { truthy, falsy }
+            }
+        }
+    }
+
+    fn visit_test_expr(&mut self, test_expr: &'ast Expr) -> TestFlowSnapshots {
+        self.add_standalone_expression(test_expr);
+        match test_expr {
+            ast::Expr::BoolOp(ast::ExprBoolOp {
+                values,
+                range: _,
+                op,
+                node_index: _,
+            }) => {
+                self.prepare_expr(test_expr);
+                self.visit_bool_op_expr(values, *op)
+            }
+            _ => {
+                self.visit_expr(test_expr);
+                let after_expr = self.flow_snapshot();
+
+                let predicate = self.build_predicate(test_expr);
+                self.record_narrowing_constraint(predicate);
+                let reach = self.record_reachability_constraint(predicate);
+                let truthy = self.flow_snapshot();
+
+                self.flow_restore(after_expr);
+
+                self.record_narrowing_constraint(predicate.negated());
+                self.record_negated_reachability_constraint(reach);
+                let falsy = self.flow_snapshot();
+
+                self.flow_merge(truthy.clone());
+
+                TestFlowSnapshots::Expr { falsy, truthy }
+            }
+        }
+    }
+
+    fn prepare_expr(&mut self, expr: &Expr) -> NodeKey {
+        self.with_semantic_checker(|semantic, context| semantic.visit_expr(expr, context));
+
+        self.scopes_by_expression
+            .insert(expr.into(), self.current_scope());
+        self.current_ast_ids().record_expression(expr);
+
+        NodeKey::from_node(expr)
+    }
 }
 
 impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
@@ -1376,7 +1485,6 @@ impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
 
             ast::Stmt::Assign(node) => {
                 debug_assert_eq!(&self.current_assignments, &[]);
-
                 self.visit_expr(&node.value);
                 let value = self.add_standalone_assigned_expression(&node.value, node);
 
@@ -1442,14 +1550,13 @@ impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
                 }
             }
             ast::Stmt::If(node) => {
-                self.visit_expr(&node.test);
-                let mut no_branch_taken = self.flow_snapshot();
-                let mut last_predicate = self.record_expression_narrowing_constraint(&node.test);
-                let mut last_reachability_constraint =
-                    self.record_reachability_constraint(last_predicate);
-                self.visit_body(&node.body);
+                let mut after_test = self.visit_test_expr(&node.test);
 
+                self.flow_restore(after_test.truthy_flow().clone());
+
+                self.visit_body(&node.body);
                 let mut post_clauses: Vec<FlowSnapshot> = vec![];
+
                 let elif_else_clauses = node
                     .elif_else_clauses
                     .iter()
@@ -1471,25 +1578,15 @@ impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
                     post_clauses.push(self.flow_snapshot());
                     // we can only take an elif/else branch if none of the previous ones were
                     // taken
-                    self.flow_restore(no_branch_taken.clone());
-
-                    self.record_negated_narrowing_constraint(last_predicate);
-                    self.record_negated_reachability_constraint(last_reachability_constraint);
+                    self.flow_restore(after_test.falsy_flow().clone());
 
                     if let Some(elif_test) = clause_test {
-                        self.visit_expr(elif_test);
-                        // A test expression is evaluated whether the branch is taken or not
-                        no_branch_taken = self.flow_snapshot();
-
-                        last_predicate = self.record_expression_narrowing_constraint(elif_test);
-
-                        last_reachability_constraint =
-                            self.record_reachability_constraint(last_predicate);
+                        after_test = self.visit_test_expr(elif_test);
+                        self.flow_restore(after_test.truthy_flow().clone());
                     }
-
                     self.visit_body(clause_body);
+                    post_clauses.push(self.flow_snapshot());
                 }
-
                 for post_clause_state in post_clauses {
                     self.flow_merge(post_clause_state);
                 }
@@ -1896,13 +1993,7 @@ impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
     }
 
     fn visit_expr(&mut self, expr: &'ast ast::Expr) {
-        self.with_semantic_checker(|semantic, context| semantic.visit_expr(expr, context));
-
-        self.scopes_by_expression
-            .insert(expr.into(), self.current_scope());
-        self.current_ast_ids().record_expression(expr);
-
-        let node_key = NodeKey::from_node(expr);
+        let node_key = self.prepare_expr(expr);
 
         match expr {
             ast::Expr::Name(ast::ExprName { ctx, .. })
@@ -2077,17 +2168,15 @@ impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
             ast::Expr::If(ast::ExprIf {
                 body, test, orelse, ..
             }) => {
-                self.visit_expr(test);
-                let pre_if = self.flow_snapshot();
-                let predicate = self.record_expression_narrowing_constraint(test);
-                let reachability_constraint = self.record_reachability_constraint(predicate);
+                let after_test = self.visit_test_expr(test);
+
+                self.flow_restore(after_test.truthy_flow().clone());
                 self.visit_expr(body);
                 let post_body = self.flow_snapshot();
-                self.flow_restore(pre_if);
 
-                self.record_negated_narrowing_constraint(predicate);
-                self.record_negated_reachability_constraint(reachability_constraint);
+                self.flow_restore(after_test.falsy_flow().clone());
                 self.visit_expr(orelse);
+
                 self.flow_merge(post_body);
             }
             ast::Expr::ListComp(
@@ -2146,51 +2235,7 @@ impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
                 node_index: _,
                 op,
             }) => {
-                let mut snapshots = vec![];
-                let mut reachability_constraints = vec![];
-
-                for (index, value) in values.iter().enumerate() {
-                    for id in &reachability_constraints {
-                        self.current_use_def_map_mut()
-                            .record_reachability_constraint(*id); // TODO: nicer API
-                    }
-
-                    self.visit_expr(value);
-
-                    // For the last value, we don't need to model control flow. There is no short-circuiting
-                    // anymore.
-                    if index < values.len() - 1 {
-                        let predicate = self.build_predicate(value);
-                        let predicate_id = match op {
-                            ast::BoolOp::And => self.add_predicate(predicate),
-                            ast::BoolOp::Or => self.add_negated_predicate(predicate),
-                        };
-                        let reachability_constraint = self
-                            .current_reachability_constraints_mut()
-                            .add_atom(predicate_id);
-
-                        let after_expr = self.flow_snapshot();
-
-                        // We first model the short-circuiting behavior. We take the short-circuit
-                        // path here if all of the previous short-circuit paths were not taken, so
-                        // we record all previously existing reachability constraints, and negate the
-                        // one for the current expression.
-
-                        self.record_negated_reachability_constraint(reachability_constraint);
-                        snapshots.push(self.flow_snapshot());
-
-                        // Then we model the non-short-circuiting behavior. Here, we need to delay
-                        // the application of the reachability constraint until after the expression
-                        // has been evaluated, so we only push it onto the stack here.
-                        self.flow_restore(after_expr);
-                        self.record_narrowing_constraint_id(predicate_id);
-                        reachability_constraints.push(reachability_constraint);
-                    }
-                }
-
-                for snapshot in snapshots {
-                    self.flow_merge(snapshot);
-                }
+                self.visit_bool_op_expr(values, *op);
             }
             ast::Expr::StringLiteral(_) => {
                 // Track reachability of string literals, as they could be a stringified annotation
