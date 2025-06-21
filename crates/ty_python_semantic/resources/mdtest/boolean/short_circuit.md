@@ -65,7 +65,7 @@ def _(flag: bool, number: int):
         reveal_type(x)  # revealed: int & ~AlwaysFalsy
     else:
         # error: [possibly-unresolved-reference]
-        reveal_type(x)  # revealed: int
+        reveal_type(x)  # revealed: int & ~AlwaysTruthy
 
     # error: [possibly-unresolved-reference]
     reveal_type(x)  # revealed: int
@@ -77,7 +77,7 @@ def _(flag: bool, number: int):
 def _(flag: bool, number: int):
     if flag or (x := number):
         # error: [possibly-unresolved-reference]
-        reveal_type(x)  # revealed: int
+        reveal_type(x)  # revealed: int & ~AlwaysFalsy
     else:
         # x must be defined here
         reveal_type(x)  # revealed: int & ~AlwaysTruthy
@@ -92,13 +92,13 @@ def _(flag: bool, number: int):
 def _(flag: bool, flag2: bool, number: int):
     if flag or (x := number):
         # error: [possibly-unresolved-reference]
-        reveal_type(x)  # revealed: int
+        reveal_type(x)  # revealed: int & ~AlwaysFalsy
     elif flag2 or (y := number):
         # x must be defined here
         reveal_type(x)  # revealed: int & ~AlwaysTruthy
 
         # error: [possibly-unresolved-reference]
-        reveal_type(y)  # revealed: int
+        reveal_type(y)  # revealed: int & ~AlwaysFalsy
     else:
         # x and y must be defined here
         reveal_type(x)  # revealed: int & ~AlwaysTruthy
