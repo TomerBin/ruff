@@ -5,8 +5,7 @@ use ruff_db::source::{SourceText, source_text};
 use ruff_index::IndexVec;
 use ruff_python_ast::name::Name;
 use ruff_python_ast::visitor::{Visitor, walk_expr, walk_pattern, walk_stmt};
-use ruff_python_ast::{self as ast, BoolOp, Expr, PySourceType, PythonVersion};
-use ruff_python_ast::{self as ast, NodeIndex, PySourceType, PythonVersion};
+use ruff_python_ast::{self as ast, BoolOp, Expr, NodeIndex, PySourceType, PythonVersion};
 use ruff_python_parser::semantic_errors::{
     SemanticSyntaxChecker, SemanticSyntaxContext, SemanticSyntaxError, SemanticSyntaxErrorKind,
 };
@@ -1351,7 +1350,7 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
         self.scopes_by_expression
             .record_expression(expr, self.current_scope());
 
-        let node_key = NodeKey::from_node(expr);
+        NodeKey::from_node(expr)
     }
 }
 
