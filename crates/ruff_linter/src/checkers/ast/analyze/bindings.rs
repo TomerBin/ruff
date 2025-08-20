@@ -4,8 +4,8 @@ use crate::Fix;
 use crate::checkers::ast::Checker;
 use crate::codes::Rule;
 use crate::rules::{
-    flake8_import_conventions, flake8_pyi, flake8_pytest_style, flake8_type_checking, pyflakes,
-    pylint, pyupgrade, refurb, ruff,
+    flake8_import_conventions, flake8_pyi, flake8_pytest_style, flake8_return,
+    flake8_type_checking, pyflakes, pylint, pyupgrade, refurb, ruff,
 };
 
 /// Run lint rules over the [`Binding`]s.
@@ -25,16 +25,25 @@ pub(crate) fn bindings(checker: &Checker) {
         Rule::ForLoopWrites,
         Rule::CustomTypeVarForSelf,
         Rule::PrivateTypeParameter,
+        Rule::UnnecessaryAssign,
     ]) {
         return;
     }
 
     for (binding_id, binding) in checker.semantic.bindings.iter_enumerated() {
+        if checker.is_rule_enabled(Rule::UnnecessaryAssign) {
+            if binding.kind.is_function_definition() {
+                flake8_return::rules::unnecessary_assign(
+                    checker,
+                    binding.statement(checker.semantic()).unwrap(),
+                );
+            }
+        }
         if checker.is_rule_enabled(Rule::UnusedVariable) {
             if binding.kind.is_bound_exception()
                 && binding.is_unused()
                 && !checker
-                    .settings
+                    .settings()
                     .dummy_variable_rgx
                     .is_match(binding.name(checker.source()))
             {
@@ -67,7 +76,7 @@ pub(crate) fn bindings(checker: &Checker) {
             flake8_import_conventions::rules::unconventional_import_alias(
                 checker,
                 binding,
-                &checker.settings.flake8_import_conventions.aliases,
+                &checker.settings().flake8_import_conventions.aliases,
             );
         }
         if checker.is_rule_enabled(Rule::UnaliasedCollectionsAbcSetImport) {

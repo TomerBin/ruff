@@ -1,5 +1,5 @@
 use anyhow::{Context, anyhow};
-use ruff_db::Upcast;
+use ruff_db::Db;
 use ruff_db::files::{File, Files, system_path_to_file};
 use ruff_db::system::{DbWithTestSystem, System, SystemPath, SystemPathBuf, TestSystem};
 use ruff_db::vendored::VendoredFileSystem;
@@ -116,13 +116,6 @@ fn run_corpus_tests(pattern: &str) -> anyhow::Result<()> {
             .with_context(|| format!("Failed to read test file: {path}"))?;
 
         let mut check_with_file_name = |path: &SystemPath| {
-            if relative_path.file_name() == Some("types.pyi") {
-                println!(
-                    "Skipping {relative_path:?}: paths with `types.pyi` as their final segment cause a stack overflow"
-                );
-                return;
-            }
-
             db.memory_file_system().write_file_all(path, &code).unwrap();
             File::sync_path(&mut db, path);
 
@@ -205,15 +198,16 @@ impl CorpusDb {
         Program::from_settings(
             &db,
             ProgramSettings {
-                python_version: Some(PythonVersionWithSource {
+                python_version: PythonVersionWithSource {
                     version: PythonVersion::latest_ty(),
                     source: PythonVersionSource::default(),
-                }),
+                },
                 python_platform: PythonPlatform::default(),
-                search_paths: SearchPathSettings::new(vec![]),
+                search_paths: SearchPathSettings::new(vec![])
+                    .to_search_paths(db.system(), db.vendored())
+                    .unwrap(),
             },
-        )
-        .unwrap();
+        );
 
         db
     }
@@ -248,18 +242,9 @@ impl ruff_db::Db for CorpusDb {
     }
 }
 
-impl Upcast<dyn ruff_db::Db> for CorpusDb {
-    fn upcast(&self) -> &(dyn ruff_db::Db + 'static) {
-        self
-    }
-    fn upcast_mut(&mut self) -> &mut (dyn ruff_db::Db + 'static) {
-        self
-    }
-}
-
 #[salsa::db]
 impl ty_python_semantic::Db for CorpusDb {
-    fn is_file_open(&self, file: File) -> bool {
+    fn should_check_file(&self, file: File) -> bool {
         !file.path(self).is_vendored_path()
     }
 

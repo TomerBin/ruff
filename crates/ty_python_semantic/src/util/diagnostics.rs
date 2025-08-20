@@ -1,5 +1,6 @@
 use crate::{Db, Program, PythonVersionWithSource};
-use ruff_db::diagnostic::{Annotation, Diagnostic, Severity, SubDiagnostic};
+use ruff_db::diagnostic::{Annotation, Diagnostic, SubDiagnostic, SubDiagnosticSeverity};
+use std::fmt::Write;
 
 /// Add a subdiagnostic to `diagnostic` that explains why a certain Python version was inferred.
 ///
@@ -22,7 +23,7 @@ pub fn add_inferred_python_version_hint_to_diagnostic(
         crate::PythonVersionSource::ConfigFile(source) => {
             if let Some(span) = source.span(db) {
                 let mut sub_diagnostic = SubDiagnostic::new(
-                    Severity::Info,
+                    SubDiagnosticSeverity::Info,
                     format_args!("Python {version} was assumed when {action}"),
                 );
                 sub_diagnostic.annotate(Annotation::primary(span).message(format_args!(
@@ -38,7 +39,7 @@ pub fn add_inferred_python_version_hint_to_diagnostic(
         crate::PythonVersionSource::PyvenvCfgFile(source) => {
             if let Some(span) = source.span(db) {
                 let mut sub_diagnostic = SubDiagnostic::new(
-                    Severity::Info,
+                    SubDiagnosticSeverity::Info,
                     format_args!(
                         "Python {version} was assumed when {action} because of your virtual environment"
                     ),
@@ -60,6 +61,12 @@ pub fn add_inferred_python_version_hint_to_diagnostic(
                 "No Python version was specified on the command line \
                 or in a configuration file",
             );
+        }
+        crate::PythonVersionSource::PythonVSCodeExtension => {
+            diagnostic.info(format_args!(
+                "Python {version} was assumed when {action} \
+                because it's the version of the selected Python interpreter in the VS Code Python extension",
+            ));
         }
         crate::PythonVersionSource::InstallationDirectoryLayout {
             site_packages_parent_dir,
@@ -86,4 +93,28 @@ pub fn add_inferred_python_version_hint_to_diagnostic(
             ));
         }
     }
+}
+
+/// Format a list of elements as a human-readable enumeration.
+///
+/// Encloses every element in backticks (`1`, `2` and `3`).
+pub(crate) fn format_enumeration<I, IT, D>(elements: I) -> String
+where
+    I: IntoIterator<IntoIter = IT>,
+    IT: ExactSizeIterator<Item = D> + DoubleEndedIterator,
+    D: std::fmt::Display,
+{
+    let mut elements = elements.into_iter();
+    debug_assert!(elements.len() >= 2);
+
+    let final_element = elements.next_back().unwrap();
+    let penultimate_element = elements.next_back().unwrap();
+
+    let mut buffer = String::new();
+    for element in elements {
+        write!(&mut buffer, "`{element}`, ").ok();
+    }
+    write!(&mut buffer, "`{penultimate_element}` and `{final_element}`").ok();
+
+    buffer
 }

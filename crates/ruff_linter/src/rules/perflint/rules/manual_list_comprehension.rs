@@ -249,6 +249,11 @@ pub(crate) fn manual_list_comprehension(checker: &Checker, for_stmt: &ast::StmtF
         .iter()
         .find(|binding| for_stmt.target.range() == binding.range)
         .unwrap();
+    // If the target variable is global (e.g., `global INDEX`) or nonlocal (e.g., `nonlocal INDEX`),
+    // then it is intended to be used elsewhere outside the for loop.
+    if target_binding.is_global() || target_binding.is_nonlocal() {
+        return;
+    }
     // If any references to the loop target variable are after the loop,
     // then converting it into a comprehension would cause a NameError
     if target_binding
@@ -337,7 +342,7 @@ pub(crate) fn manual_list_comprehension(checker: &Checker, for_stmt: &ast::StmtF
     );
 
     // TODO: once this fix is stabilized, change the rule to always fixable
-    if is_fix_manual_list_comprehension_enabled(checker.settings) {
+    if is_fix_manual_list_comprehension_enabled(checker.settings()) {
         diagnostic.try_set_fix(|| {
             convert_to_list_extend(
                 comprehension_type,
@@ -406,7 +411,14 @@ fn convert_to_list_extend(
     };
     let target_str = locator.slice(for_stmt.target.range());
     let elt_str = locator.slice(to_append);
-    let generator_str = format!("{elt_str} {for_type} {target_str} in {for_iter_str}{if_str}");
+    let generator_str = if to_append
+        .as_generator_expr()
+        .is_some_and(|generator| !generator.parenthesized)
+    {
+        format!("({elt_str}) {for_type} {target_str} in {for_iter_str}{if_str}")
+    } else {
+        format!("{elt_str} {for_type} {target_str} in {for_iter_str}{if_str}")
+    };
 
     let variable_name = locator.slice(binding);
     let for_loop_inline_comments = comment_strings_in_range(

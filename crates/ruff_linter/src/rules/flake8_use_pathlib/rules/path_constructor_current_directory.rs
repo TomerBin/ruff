@@ -9,6 +9,7 @@ use ruff_text_size::{Ranged, TextRange};
 
 use crate::checkers::ast::Checker;
 use crate::fix::edits::{Parentheses, remove_argument};
+use crate::rules::flake8_use_pathlib::helpers::is_pure_path_subclass_with_preview;
 use crate::{AlwaysFixableViolation, Applicability, Edit, Fix};
 
 /// ## What it does
@@ -33,6 +34,10 @@ use crate::{AlwaysFixableViolation, Applicability, Edit, Fix};
 /// _ = Path()
 /// ```
 ///
+/// ## Fix safety
+/// This fix is marked unsafe if there are comments inside the parentheses, as applying
+/// the fix will delete them.
+///
 /// ## References
 /// - [Python documentation: `Path`](https://docs.python.org/3/library/pathlib.html#pathlib.Path)
 #[derive(ViolationMetadata)]
@@ -50,7 +55,11 @@ impl AlwaysFixableViolation for PathConstructorCurrentDirectory {
 }
 
 /// PTH201
-pub(crate) fn path_constructor_current_directory(checker: &Checker, call: &ExprCall) {
+pub(crate) fn path_constructor_current_directory(
+    checker: &Checker,
+    call: &ExprCall,
+    segments: &[&str],
+) {
     let applicability = |range| {
         if checker.comment_ranges().intersects(range) {
             Applicability::Unsafe
@@ -59,15 +68,9 @@ pub(crate) fn path_constructor_current_directory(checker: &Checker, call: &ExprC
         }
     };
 
-    let (func, arguments) = (&call.func, &call.arguments);
+    let arguments = &call.arguments;
 
-    if !checker
-        .semantic()
-        .resolve_qualified_name(func)
-        .is_some_and(|qualified_name| {
-            matches!(qualified_name.segments(), ["pathlib", "Path" | "PurePath"])
-        })
-    {
+    if !is_pure_path_subclass_with_preview(checker, segments) {
         return;
     }
 

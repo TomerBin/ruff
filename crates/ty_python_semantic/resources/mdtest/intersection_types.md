@@ -717,6 +717,18 @@ def never(
     reveal_type(d)  # revealed: Never
 ```
 
+Regression tests for complex nested simplifications:
+
+```py
+from typing_extensions import Any, assert_type
+
+def _(x: Intersection[bool, Not[Intersection[Any, Not[AlwaysTruthy], Not[AlwaysFalsy]]]]):
+    assert_type(x, bool)
+
+def _(x: Intersection[bool, Any] | Literal[True] | Literal[False]):
+    assert_type(x, bool)
+```
+
 ## Simplification of `LiteralString`, `AlwaysTruthy` and `AlwaysFalsy`
 
 Similarly, intersections between `LiteralString`, `AlwaysTruthy` and `AlwaysFalsy` can be
@@ -749,6 +761,65 @@ def f(
     reveal_type(h)  # revealed: LiteralString & ~Literal[""]
     reveal_type(i)  # revealed: Unknown & Literal[""]
     reveal_type(j)  # revealed: Unknown & Literal[""]
+```
+
+## Simplifications involving enums and enum literals
+
+```toml
+[environment]
+python-version = "3.12"
+```
+
+```py
+from ty_extensions import Intersection, Not
+from typing import Literal
+from enum import Enum
+
+class Color(Enum):
+    RED = "red"
+    GREEN = "green"
+    BLUE = "blue"
+
+type Red = Literal[Color.RED]
+type Green = Literal[Color.GREEN]
+type Blue = Literal[Color.BLUE]
+
+def f(
+    a: Intersection[Color, Red],
+    b: Intersection[Color, Not[Red]],
+    c: Intersection[Color, Not[Red | Green]],
+    d: Intersection[Color, Not[Red | Green | Blue]],
+    e: Intersection[Red, Not[Color]],
+    f: Intersection[Red | Green, Not[Color]],
+    g: Intersection[Not[Red], Color],
+    h: Intersection[Red, Green],
+    i: Intersection[Red | Green, Green | Blue],
+):
+    reveal_type(a)  # revealed: Literal[Color.RED]
+    reveal_type(b)  # revealed: Literal[Color.GREEN, Color.BLUE]
+    reveal_type(c)  # revealed: Literal[Color.BLUE]
+    reveal_type(d)  # revealed: Never
+    reveal_type(e)  # revealed: Never
+    reveal_type(f)  # revealed: Never
+    reveal_type(g)  # revealed: Literal[Color.GREEN, Color.BLUE]
+    reveal_type(h)  # revealed: Never
+    reveal_type(i)  # revealed: Literal[Color.GREEN]
+
+class Single(Enum):
+    VALUE = 0
+
+def g(
+    a: Intersection[Single, Literal[Single.VALUE]],
+    b: Intersection[Single, Not[Literal[Single.VALUE]]],
+    c: Intersection[Not[Literal[Single.VALUE]], Single],
+    d: Intersection[Single, Not[Single]],
+    e: Intersection[Single | int, Not[Single]],
+):
+    reveal_type(a)  # revealed: Single
+    reveal_type(b)  # revealed: Never
+    reveal_type(c)  # revealed: Never
+    reveal_type(d)  # revealed: Never
+    reveal_type(e)  # revealed: int
 ```
 
 ## Addition of a type to an intersection with many non-disjoint types

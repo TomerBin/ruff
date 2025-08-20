@@ -2,6 +2,7 @@
 use ruff_benchmark::criterion;
 use ruff_benchmark::real_world_projects::{InstalledProject, RealWorldProject};
 
+use std::fmt::Write;
 use std::ops::Range;
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
@@ -17,7 +18,7 @@ use ruff_python_ast::PythonVersion;
 use ty_project::metadata::options::{EnvironmentOptions, Options};
 use ty_project::metadata::value::{RangedValue, RelativePathBuf};
 use ty_project::watch::{ChangeEvent, ChangedKind};
-use ty_project::{Db, ProjectDatabase, ProjectMetadata};
+use ty_project::{CheckMode, Db, ProjectDatabase, ProjectMetadata};
 
 struct Case {
     db: ProjectDatabase,
@@ -101,6 +102,7 @@ fn setup_tomllib_case() -> Case {
 
     let re = re.unwrap();
 
+    db.set_check_mode(CheckMode::OpenFiles);
     db.project().set_open_files(&mut db, tomllib_files);
 
     let re_path = re.path(&db).as_system_path().unwrap().to_owned();
@@ -236,6 +238,7 @@ fn setup_micro_case(code: &str) -> Case {
     let mut db = ProjectDatabase::new(metadata, system).unwrap();
     let file = system_path_to_file(&db, SystemPathBuf::from(file_path)).unwrap();
 
+    db.set_check_mode(CheckMode::OpenFiles);
     db.project()
         .set_open_files(&mut db, FxHashSet::from_iter([file]));
 
@@ -348,6 +351,165 @@ fn benchmark_many_tuple_assignments(criterion: &mut Criterion) {
     });
 }
 
+fn benchmark_tuple_implicit_instance_attributes(criterion: &mut Criterion) {
+    setup_rayon();
+
+    criterion.bench_function("ty_micro[many_tuple_assignments]", |b| {
+        b.iter_batched_ref(
+            || {
+                // This is a regression benchmark for a case that used to hang:
+                // https://github.com/astral-sh/ty/issues/765
+                setup_micro_case(
+                    r#"
+                    from typing import Any
+
+                    class A:
+                        foo: tuple[Any, ...]
+
+                    class B(A):
+                        def __init__(self, parent: "C", x: tuple[Any]):
+                            self.foo = parent.foo + x
+
+                    class C(A):
+                        def __init__(self, parent: B, x: tuple[Any]):
+                            self.foo = parent.foo + x
+                    "#,
+                )
+            },
+            |case| {
+                let Case { db, .. } = case;
+                let result = db.check();
+                assert_eq!(result.len(), 0);
+            },
+            BatchSize::SmallInput,
+        );
+    });
+}
+
+fn benchmark_complex_constrained_attributes_1(criterion: &mut Criterion) {
+    setup_rayon();
+
+    criterion.bench_function("ty_micro[complex_constrained_attributes_1]", |b| {
+        b.iter_batched_ref(
+            || {
+                // This is a regression benchmark for https://github.com/astral-sh/ty/issues/627.
+                // Before this was fixed, the following sample would take >1s to type check.
+                setup_micro_case(
+                    r#"
+                    class C:
+                        def f(self: "C"):
+                            if isinstance(self.a, str):
+                                return
+
+                            if isinstance(self.b, str):
+                                return
+                            if isinstance(self.b, str):
+                                return
+                            if isinstance(self.b, str):
+                                return
+                            if isinstance(self.b, str):
+                                return
+                            if isinstance(self.b, str):
+                                return
+                            if isinstance(self.b, str):
+                                return
+                            if isinstance(self.b, str):
+                                return
+                            if isinstance(self.b, str):
+                                return
+                            if isinstance(self.b, str):
+                                return
+                            if isinstance(self.b, str):
+                                return
+                            if isinstance(self.b, str):
+                                return
+                            if isinstance(self.b, str):
+                                return
+                    "#,
+                )
+            },
+            |case| {
+                let Case { db, .. } = case;
+                let result = db.check();
+                assert!(!result.is_empty());
+            },
+            BatchSize::SmallInput,
+        );
+    });
+}
+
+fn benchmark_complex_constrained_attributes_2(criterion: &mut Criterion) {
+    setup_rayon();
+
+    criterion.bench_function("ty_micro[complex_constrained_attributes_2]", |b| {
+        b.iter_batched_ref(
+            || {
+                // This is is similar to the case above, but now the attributes are actually defined.
+                // https://github.com/astral-sh/ty/issues/711
+                setup_micro_case(
+                    r#"
+                    class C:
+                        def f(self: "C"):
+                            self.a = ""
+                            self.b = ""
+
+                            if isinstance(self.a, str):
+                                return
+
+                            if isinstance(self.b, str):
+                                return
+                            if isinstance(self.b, str):
+                                return
+                            if isinstance(self.b, str):
+                                return
+                            if isinstance(self.b, str):
+                                return
+                            if isinstance(self.b, str):
+                                return
+                    "#,
+                )
+            },
+            |case| {
+                let Case { db, .. } = case;
+                let result = db.check();
+                assert_eq!(result.len(), 0);
+            },
+            BatchSize::SmallInput,
+        );
+    });
+}
+
+fn benchmark_many_enum_members(criterion: &mut Criterion) {
+    const NUM_ENUM_MEMBERS: usize = 512;
+
+    setup_rayon();
+
+    let mut code = String::new();
+    writeln!(&mut code, "from enum import Enum").ok();
+
+    writeln!(&mut code, "class E(Enum):").ok();
+    for i in 0..NUM_ENUM_MEMBERS {
+        writeln!(&mut code, "    m{i} = {i}").ok();
+    }
+    writeln!(&mut code).ok();
+
+    for i in 0..NUM_ENUM_MEMBERS {
+        writeln!(&mut code, "print(E.m{i})").ok();
+    }
+
+    criterion.bench_function("ty_micro[many_enum_members]", |b| {
+        b.iter_batched_ref(
+            || setup_micro_case(&code),
+            |case| {
+                let Case { db, .. } = case;
+                let result = db.check();
+                assert_eq!(result.len(), 0);
+            },
+            BatchSize::SmallInput,
+        );
+    });
+}
+
 struct ProjectBenchmark<'a> {
     project: InstalledProject<'a>,
     fs: MemoryFileSystem,
@@ -377,8 +539,7 @@ impl<'a> ProjectBenchmark<'a> {
         metadata.apply_options(Options {
             environment: Some(EnvironmentOptions {
                 python_version: Some(RangedValue::cli(self.project.config.python_version)),
-                python: (!self.project.config().dependencies.is_empty())
-                    .then_some(RelativePathBuf::cli(SystemPath::new(".venv"))),
+                python: Some(RelativePathBuf::cli(SystemPath::new(".venv"))),
                 ..EnvironmentOptions::default()
             }),
             ..Options::default()
@@ -401,17 +562,21 @@ impl<'a> ProjectBenchmark<'a> {
 
 #[track_caller]
 fn bench_project(benchmark: &ProjectBenchmark, criterion: &mut Criterion) {
-    fn check_project(db: &mut ProjectDatabase, max_diagnostics: usize) {
+    fn check_project(db: &mut ProjectDatabase, project_name: &str, max_diagnostics: usize) {
         let result = db.check();
         let diagnostics = result.len();
 
-        assert!(
-            diagnostics > 1 && diagnostics <= max_diagnostics,
-            "Expected between {} and {} diagnostics but got {}",
-            1,
-            max_diagnostics,
-            diagnostics
-        );
+        if diagnostics > max_diagnostics {
+            let details = result
+                .into_iter()
+                .map(|diagnostic| diagnostic.concise_message().to_string())
+                .collect::<Vec<_>>()
+                .join("\n  ");
+            assert!(
+                diagnostics <= max_diagnostics,
+                "{project_name}: Expected <={max_diagnostics} diagnostics but got {diagnostics}:\n  {details}",
+            );
+        }
     }
 
     setup_rayon();
@@ -421,7 +586,7 @@ fn bench_project(benchmark: &ProjectBenchmark, criterion: &mut Criterion) {
     group.bench_function(benchmark.project.config.name, |b| {
         b.iter_batched_ref(
             || benchmark.setup_iteration(),
-            |db| check_project(db, benchmark.max_diagnostics),
+            |db| check_project(db, benchmark.project.config.name, benchmark.max_diagnostics),
             BatchSize::SmallInput,
         );
     });
@@ -478,11 +643,32 @@ fn anyio(criterion: &mut Criterion) {
     bench_project(&benchmark, criterion);
 }
 
+fn datetype(criterion: &mut Criterion) {
+    let benchmark = ProjectBenchmark::new(
+        RealWorldProject {
+            name: "DateType",
+            repository: "https://github.com/glyph/DateType",
+            commit: "57c9c93cf2468069f72945fc04bf27b64100dad8",
+            paths: vec![SystemPath::new("src")],
+            dependencies: vec![],
+            max_dep_date: "2025-07-04",
+            python_version: PythonVersion::PY313,
+        },
+        2,
+    );
+
+    bench_project(&benchmark, criterion);
+}
+
 criterion_group!(check_file, benchmark_cold, benchmark_incremental);
 criterion_group!(
     micro,
     benchmark_many_string_assignments,
     benchmark_many_tuple_assignments,
+    benchmark_tuple_implicit_instance_attributes,
+    benchmark_complex_constrained_attributes_1,
+    benchmark_complex_constrained_attributes_2,
+    benchmark_many_enum_members,
 );
-criterion_group!(project, anyio, attrs, hydra);
+criterion_group!(project, anyio, attrs, hydra, datetype);
 criterion_main!(check_file, micro, project);

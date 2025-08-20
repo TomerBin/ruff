@@ -43,7 +43,7 @@ else:
 if (isinstance(x, int) or isinstance(x, str)) and x:
     reveal_type(x)  # revealed: Literal[-1, True, "foo"]
 else:
-    reveal_type(x)  # revealed: Literal[b"", b"bar", 0, False, ""] | None | tuple[()]
+    reveal_type(x)  # revealed: Literal[0, -1, "", "foo", b"", b"bar"] | bool | None | tuple[()]`
 ```
 
 ## Function Literals

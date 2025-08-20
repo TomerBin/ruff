@@ -3,7 +3,7 @@ use crate::python_version::PythonVersion;
 use clap::error::ErrorKind;
 use clap::{ArgAction, ArgMatches, Error, Parser};
 use ruff_db::system::SystemPathBuf;
-use ty_project::combine::Combine;
+use ty_combine::Combine;
 use ty_project::metadata::options::{EnvironmentOptions, Options, SrcOptions, TerminalOptions};
 use ty_project::metadata::value::{RangedValue, RelativeGlobPattern, RelativePathBuf, ValueSource};
 use ty_python_semantic::lint;
@@ -193,6 +193,7 @@ impl CheckCommand {
                         .map(RelativePathBuf::cli)
                         .collect()
                 }),
+                ..EnvironmentOptions::default()
             }),
             terminal: Some(TerminalOptions {
                 output_format: self
@@ -322,8 +323,8 @@ pub enum OutputFormat {
     Concise,
 }
 
-impl From<OutputFormat> for ruff_db::diagnostic::DiagnosticFormat {
-    fn from(format: OutputFormat) -> ruff_db::diagnostic::DiagnosticFormat {
+impl From<OutputFormat> for ty_project::metadata::options::OutputFormat {
+    fn from(format: OutputFormat) -> ty_project::metadata::options::OutputFormat {
         match format {
             OutputFormat::Full => Self::Full,
             OutputFormat::Concise => Self::Concise,
