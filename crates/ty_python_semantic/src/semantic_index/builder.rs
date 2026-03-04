@@ -11,7 +11,7 @@ use ruff_db::source::{SourceText, source_text};
 use ruff_index::IndexVec;
 use ruff_python_ast::name::Name;
 use ruff_python_ast::visitor::{Visitor, walk_expr, walk_pattern, walk_stmt};
-use ruff_python_ast::{self as ast, AtomicNodeIndex, NodeIndex, PySourceType, PythonVersion};
+use ruff_python_ast::{self as ast, BoolOp, Expr, NodeIndex, PySourceType, PythonVersion, AtomicNodeIndex};
 use ruff_python_parser::semantic_errors::{
     LazyImportContext, SemanticSyntaxChecker, SemanticSyntaxContext, SemanticSyntaxError,
     SemanticSyntaxErrorKind, YieldOutsideFunctionKind,
@@ -3104,55 +3104,7 @@ impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
                 node_index: _,
                 op,
             }) => {
-                let mut snapshots = vec![];
-                let mut reachability_constraints = vec![];
-
-                for (index, value) in values.iter().enumerate() {
-                    for id in &reachability_constraints {
-                        self.current_use_def_map_mut()
-                            .record_reachability_constraint(*id); // TODO: nicer API
-                    }
-
-                    self.visit_expr(value);
-
-                    // For the last value, we don't need to model control flow. There is no short-circuiting
-                    // anymore.
-                    if index < values.len() - 1 {
-                        let predicate = self.build_predicate(value);
-                        let possibly_narrowed = self.compute_possibly_narrowed_places(&predicate);
-                        let predicate_id = match op {
-                            ast::BoolOp::And => self.add_predicate(predicate),
-                            ast::BoolOp::Or => self.add_negated_predicate(predicate),
-                        };
-                        let reachability_constraint = self
-                            .current_reachability_constraints_mut()
-                            .add_atom(predicate_id);
-
-                        let after_expr = self.flow_snapshot();
-
-                        // We first model the short-circuiting behavior. We take the short-circuit
-                        // path here if all of the previous short-circuit paths were not taken, so
-                        // we record all previously existing reachability constraints, and negate the
-                        // one for the current expression.
-
-                        self.record_negated_reachability_constraint(reachability_constraint);
-                        snapshots.push(self.flow_snapshot());
-
-                        // Then we model the non-short-circuiting behavior. Here, we need to delay
-                        // the application of the reachability constraint until after the expression
-                        // has been evaluated, so we only push it onto the stack here.
-                        self.flow_restore(after_expr);
-                        self.record_narrowing_constraint_id_for_places(
-                            predicate_id,
-                            &possibly_narrowed,
-                        );
-                        reachability_constraints.push(reachability_constraint);
-                    }
-                }
-
-                for snapshot in snapshots {
-                    self.flow_merge(snapshot);
-                }
+                self.visit_bool_op_expr(values, op);
             }
             ast::Expr::StringLiteral(_) => {
                 // Track reachability of string literals, as they could be a stringified annotation
@@ -3224,6 +3176,57 @@ impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
         }
 
         self.current_match_case.as_mut().unwrap().index += 1;
+    }
+}
+
+impl<'ast> SemanticIndexBuilder<'_, 'ast> {
+    fn visit_bool_op_expr(&mut self, values: &'ast Vec<Expr>, op: &BoolOp) {
+        let mut snapshots = vec![];
+        let mut reachability_constraints = vec![];
+
+        for (index, value) in values.iter().enumerate() {
+            for id in &reachability_constraints {
+                self.current_use_def_map_mut()
+                    .record_reachability_constraint(*id); // TODO: nicer API
+            }
+
+            self.visit_expr(value);
+
+            // For the last value, we don't need to model control flow. There is no short-circuiting
+            // anymore.
+            if index < values.len() - 1 {
+                let predicate = self.build_predicate(value);
+                let possibly_narrowed = self.compute_possibly_narrowed_places(&predicate);
+                let predicate_id = match op {
+                    ast::BoolOp::And => self.add_predicate(predicate),
+                    ast::BoolOp::Or => self.add_negated_predicate(predicate),
+                };
+                let reachability_constraint = self
+                    .current_reachability_constraints_mut()
+                    .add_atom(predicate_id);
+
+                let after_expr = self.flow_snapshot();
+
+                // We first model the short-circuiting behavior. We take the short-circuit
+                // path here if all of the previous short-circuit paths were not taken, so
+                // we record all previously existing reachability constraints, and negate the
+                // one for the current expression.
+
+                self.record_negated_reachability_constraint(reachability_constraint);
+                snapshots.push(self.flow_snapshot());
+
+                // Then we model the non-short-circuiting behavior. Here, we need to delay
+                // the application of the reachability constraint until after the expression
+                // has been evaluated, so we only push it onto the stack here.
+                self.flow_restore(after_expr);
+                self.record_narrowing_constraint_id_for_places(predicate_id, &possibly_narrowed);
+                reachability_constraints.push(reachability_constraint);
+            }
+        }
+
+        for snapshot in snapshots {
+            self.flow_merge(snapshot);
+        }
     }
 }
 
