@@ -8465,12 +8465,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             *op,
             values.iter().enumerate(),
             |builder, (index, value)| {
-                let ty = if index == values.len() - 1 {
-                    builder.infer_expression(value, TypeContext::default())
-                } else {
-                    builder.infer_maybe_standalone_expression(value, TypeContext::default())
-                };
-
+                let ty = builder.infer_maybe_standalone_expression(value, TypeContext::default());
                 (ty, value.range())
             },
         )

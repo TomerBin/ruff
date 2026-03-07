@@ -1626,7 +1626,9 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
     }
 
     fn visit_test_expr(&mut self, test_expr: &'ast Expr) -> TestFlowSnapshots {
-        // self.add_standalone_expression(test_expr);
+        if let Some(bool_op_expr) = test_expr.as_bool_op_expr() {
+            return self.visit_bool_op_expr(&bool_op_expr.values, &bool_op_expr.op);
+        }
         self.visit_expr(test_expr);
         let predicate = self.build_predicate(test_expr);
         let possibly_narrowed = self.compute_possibly_narrowed_places(&predicate);
@@ -1634,9 +1636,7 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
 
         // simulating truthy
         let predicate_id = self.add_predicate(predicate);
-        let reachability_constraint = self
-            .current_reachability_constraints_mut()
-            .add_atom(predicate_id);
+        let reachability_constraint = self.record_reachability_constraint(predicate);
         self.record_narrowing_constraint_id_for_places(predicate_id, &possibly_narrowed);
         let truthy = self.flow_snapshot();
 
@@ -3212,29 +3212,40 @@ impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
 }
 
 impl<'ast> SemanticIndexBuilder<'_, 'ast> {
-    fn visit_bool_op_expr(&mut self, values: &'ast Vec<Expr>, op: &BoolOp) {
+    fn visit_bool_op_expr(&mut self, values: &'ast Vec<Expr>, op: &BoolOp) -> TestFlowSnapshots {
         let mut short_circuits = vec![];
-
-        for (index, value) in values.iter().enumerate() {
-            if index < values.len() - 1 {
-                let test_flow_snapshots = self.visit_test_expr(value);
-                match op {
-                    BoolOp::And => {
-                        short_circuits.push(test_flow_snapshots.falsy.clone());
-                        self.flow_restore(test_flow_snapshots.truthy);
-                    }
-                    BoolOp::Or => {
-                        short_circuits.push(test_flow_snapshots.truthy.clone());
-                        self.flow_restore(test_flow_snapshots.falsy);
-                    }
+        for value in values.iter() {
+            let test_flow_snapshots = self.visit_test_expr(value);
+            match op {
+                BoolOp::And => {
+                    short_circuits.push(test_flow_snapshots.falsy.clone());
+                    self.flow_restore(test_flow_snapshots.truthy);
                 }
-            } else {
-                self.visit_expr(value);
+                BoolOp::Or => {
+                    short_circuits.push(test_flow_snapshots.truthy.clone());
+                    self.flow_restore(test_flow_snapshots.falsy);
+                }
+            }
+        }
+        let full_flow = self.flow_snapshot();
+
+        if let Some((first, rest)) = short_circuits.split_first() {
+            self.flow_restore(first.clone());
+            for snapshot in rest.clone() {
+                self.flow_merge(snapshot.clone());
             }
         }
 
-        for snapshot in short_circuits {
-            self.flow_merge(snapshot);
+        let short_circuit_flow = self.flow_snapshot();
+        match op {
+            BoolOp::And => TestFlowSnapshots {
+                truthy: full_flow,
+                falsy: short_circuit_flow,
+            },
+            BoolOp::Or => TestFlowSnapshots {
+                truthy: short_circuit_flow,
+                falsy: full_flow,
+            },
         }
     }
 }
