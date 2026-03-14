@@ -89,11 +89,11 @@ def _(flag: bool, number: int):
 ### Elif
 
 ```py
-def _(flag: bool, flag2: bool, number: int):
+def _(flag: bool, flag2: bool, number: int, number2: int):
     if flag or (x := number):
         # error: [possibly-unresolved-reference]
         reveal_type(x)  # revealed: int & ~AlwaysFalsy
-    elif flag2 or (y := number):
+    elif flag2 or (y := number2):
         # x must be defined here
         reveal_type(x)  # revealed: int & ~AlwaysTruthy
 
@@ -107,7 +107,7 @@ def _(flag: bool, flag2: bool, number: int):
     if flag or (x := number):
         # error: [possibly-unresolved-reference]
         reveal_type(x)  # revealed: int
-    elif flag2 and (y := number):
+    elif flag2 and (y := number2):
         # x must be defined here
         reveal_type(x)  # revealed: int & ~AlwaysTruthy
 
@@ -121,7 +121,7 @@ def _(flag: bool, flag2: bool, number: int):
 
     if flag and (x := number):
         reveal_type(x)  # revealed: int & ~AlwaysFalsy
-    elif flag2 or (y := number):
+    elif flag2 or (y := number2):
         # error: [possibly-unresolved-reference]
         reveal_type(x)  # revealed: int
 
