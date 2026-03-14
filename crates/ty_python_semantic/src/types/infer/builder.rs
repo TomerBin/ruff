@@ -8461,14 +8461,10 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             op,
             values,
         } = bool_op;
-        self.infer_chained_boolean_types(
-            *op,
-            values.iter().enumerate(),
-            |builder, (index, value)| {
-                let ty = builder.infer_maybe_standalone_expression(value, TypeContext::default());
-                (ty, value.range())
-            },
-        )
+        self.infer_chained_boolean_types(*op, values.iter(), |builder, expr| {
+            let ty = builder.infer_maybe_standalone_expression(expr, TypeContext::default());
+            (ty, expr.range())
+        })
     }
 
     /// Computes the output of a chain of (one) boolean operation, consuming as input an iterator

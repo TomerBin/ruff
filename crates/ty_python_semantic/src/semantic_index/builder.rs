@@ -11,7 +11,7 @@ use ruff_db::source::{SourceText, source_text};
 use ruff_index::IndexVec;
 use ruff_python_ast::name::Name;
 use ruff_python_ast::visitor::{Visitor, walk_expr, walk_pattern, walk_stmt};
-use ruff_python_ast::{self as ast, BoolOp, Expr, NodeIndex, PySourceType, PythonVersion, AtomicNodeIndex};
+use ruff_python_ast::{self as ast, BoolOp, Expr, NodeIndex, PySourceType, PythonVersion, AtomicNodeIndex, Stmt};
 use ruff_python_parser::semantic_errors::{
     LazyImportContext, SemanticSyntaxChecker, SemanticSyntaxContext, SemanticSyntaxError,
     SemanticSyntaxErrorKind, YieldOutsideFunctionKind,
@@ -1626,6 +1626,7 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
     }
 
     fn visit_test_expr(&mut self, test_expr: &'ast Expr) -> TestFlowSnapshots {
+        self.add_standalone_expression(test_expr);
         if let Some(bool_op_expr) = test_expr.as_bool_op_expr() {
             return self.visit_bool_op_expr(&bool_op_expr.values, &bool_op_expr.op);
         }
@@ -2163,12 +2164,8 @@ impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
                 }
             }
             ast::Stmt::If(node) => {
-                self.visit_expr(&node.test);
-                let mut no_branch_taken = self.flow_snapshot();
-                let (mut last_predicate, mut last_narrowing_id) =
-                    self.record_expression_narrowing_constraint(&node.test);
-                let mut last_reachability_constraint =
-                    self.record_reachability_constraint(last_predicate);
+                let mut test_flows = self.visit_test_expr(&node.test);
+                self.flow_restore(test_flows.truthy);
 
                 let is_outer_block_in_type_checking = self.in_type_checking_block;
 
@@ -2182,7 +2179,7 @@ impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
 
                 self.visit_body(&node.body);
 
-                let mut post_clauses: Vec<FlowSnapshot> = vec![];
+                let mut short_circuits: Vec<FlowSnapshot> = vec![];
                 let elif_else_clauses = node
                     .elif_else_clauses
                     .iter()
@@ -2198,28 +2195,14 @@ impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
                     // if there's no `else` branch, we should add a no-op `else` branch
                     Some((None, Default::default()))
                 });
-
+                //
                 for (clause_test, clause_body) in elif_else_clauses {
-                    // snapshot after every block except the last; the last one will just become
-                    // the state that we merge the other snapshots into
-                    post_clauses.push(self.flow_snapshot());
-                    // we can only take an elif/else branch if none of the previous ones were
-                    // taken
-                    self.flow_restore(no_branch_taken.clone());
-
-                    self.record_negated_narrowing_constraint(last_predicate, last_narrowing_id);
-                    self.record_negated_reachability_constraint(last_reachability_constraint);
+                    short_circuits.push(self.flow_snapshot());
+                    self.flow_restore(test_flows.falsy.clone());
 
                     if let Some(elif_test) = clause_test {
-                        self.visit_expr(elif_test);
-                        // A test expression is evaluated whether the branch is taken or not
-                        no_branch_taken = self.flow_snapshot();
-
-                        (last_predicate, last_narrowing_id) =
-                            self.record_expression_narrowing_constraint(elif_test);
-
-                        last_reachability_constraint =
-                            self.record_reachability_constraint(last_predicate);
+                        test_flows = self.visit_test_expr(elif_test);
+                        self.flow_restore(test_flows.truthy.clone());
                     }
 
                     // Determine if this clause is in type checking context
@@ -2245,8 +2228,8 @@ impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
                     self.visit_body(clause_body);
                 }
 
-                for post_clause_state in post_clauses {
-                    self.flow_merge(post_clause_state);
+                for short_circuit in short_circuits {
+                    self.flow_merge(short_circuit);
                 }
 
                 self.in_type_checking_block = is_outer_block_in_type_checking;
@@ -3067,16 +3050,11 @@ impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
             ast::Expr::If(ast::ExprIf {
                 body, test, orelse, ..
             }) => {
-                self.visit_expr(test);
-                let pre_if = self.flow_snapshot();
-                let (predicate, predicate_id) = self.record_expression_narrowing_constraint(test);
-                let reachability_constraint = self.record_reachability_constraint(predicate);
+                let flow_snapshots = self.visit_test_expr(test);
+                self.flow_restore(flow_snapshots.truthy);
                 self.visit_expr(body);
                 let post_body = self.flow_snapshot();
-                self.flow_restore(pre_if);
-
-                self.record_negated_narrowing_constraint(predicate, predicate_id);
-                self.record_negated_reachability_constraint(reachability_constraint);
+                self.flow_restore(flow_snapshots.falsy);
                 self.visit_expr(orelse);
                 self.flow_merge(post_body);
             }
@@ -3136,7 +3114,9 @@ impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
                 node_index: _,
                 op,
             }) => {
-                self.visit_bool_op_expr(values, op);
+                let snapshots = self.visit_bool_op_expr(values, op);
+                self.flow_restore(snapshots.falsy);
+                self.flow_merge(snapshots.truthy);
             }
             ast::Expr::StringLiteral(_) => {
                 // Track reachability of string literals, as they could be a stringified annotation
@@ -3212,6 +3192,7 @@ impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
 }
 
 impl<'ast> SemanticIndexBuilder<'_, 'ast> {
+    #[must_use]
     fn visit_bool_op_expr(&mut self, values: &'ast Vec<Expr>, op: &BoolOp) -> TestFlowSnapshots {
         let mut short_circuits = vec![];
         for value in values.iter() {
@@ -3231,7 +3212,7 @@ impl<'ast> SemanticIndexBuilder<'_, 'ast> {
 
         if let Some((first, rest)) = short_circuits.split_first() {
             self.flow_restore(first.clone());
-            for snapshot in rest.clone() {
+            for snapshot in rest {
                 self.flow_merge(snapshot.clone());
             }
         }
