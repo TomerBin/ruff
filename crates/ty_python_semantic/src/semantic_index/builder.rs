@@ -1628,7 +1628,7 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
     fn visit_test_expr(&mut self, test_expr: &'ast Expr) -> TestFlowSnapshots {
         self.add_standalone_expression(test_expr);
         if let Some(bool_op_expr) = test_expr.as_bool_op_expr() {
-            return self.visit_bool_op_expr(&bool_op_expr.values, &bool_op_expr.op);
+            return self.visit_bool_op_expr(&bool_op_expr.values, bool_op_expr.op);
         }
         self.visit_expr(test_expr);
         let predicate = self.build_predicate(test_expr);
@@ -1648,9 +1648,7 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
         self.record_narrowing_constraint_id_for_places(negated_predicate_id, &possibly_narrowed);
         let falsy = self.flow_snapshot();
 
-        self.flow_merge(truthy.clone());
-
-        TestFlowSnapshots { falsy, truthy }
+        TestFlowSnapshots { truthy, falsy }
     }
 }
 
@@ -3114,7 +3112,7 @@ impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
                 node_index: _,
                 op,
             }) => {
-                let snapshots = self.visit_bool_op_expr(values, op);
+                let snapshots = self.visit_bool_op_expr(values, *op);
                 self.flow_restore(snapshots.falsy);
                 self.flow_merge(snapshots.truthy);
             }
@@ -3193,9 +3191,9 @@ impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
 
 impl<'ast> SemanticIndexBuilder<'_, 'ast> {
     #[must_use]
-    fn visit_bool_op_expr(&mut self, values: &'ast Vec<Expr>, op: &BoolOp) -> TestFlowSnapshots {
+    fn visit_bool_op_expr(&mut self, values: &'ast [Expr], op: BoolOp) -> TestFlowSnapshots {
         let mut short_circuits = vec![];
-        for value in values.iter() {
+        for value in values {
             let test_flow_snapshots = self.visit_test_expr(value);
             match op {
                 BoolOp::And => {
